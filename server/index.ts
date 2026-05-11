@@ -25,14 +25,26 @@ const hostFromUrl = (value?: string) => {
   }
 };
 
-app.use(cors({ origin: true }));
+app.use(cors({ origin: true, methods: ["GET", "POST", "OPTIONS"], allowedHeaders: ["Content-Type", "Authorization"] }));
+app.options(/.*/, (_request, response) => {
+  response.sendStatus(204);
+});
 app.use(express.json({ limit: "64kb" }));
 
+const healthPayload = () => ({
+  ok: true,
+  service: "ProofRent simulated confidential execution service",
+  signer: getServicePublicKey(),
+});
+
 app.get("/api/health", (_request, response) => {
+  response.json(healthPayload());
+});
+
+app.post("/api/health", (_request, response) => {
   response.json({
-    ok: true,
-    service: "ProofRent simulated confidential execution service",
-    signer: getServicePublicKey(),
+    ...healthPayload(),
+    method: "POST",
   });
 });
 
@@ -164,7 +176,38 @@ app.get("/api/proofs/:proofId/status", (request, response) => {
   });
 });
 
+app.post("/api/proofs/:proofId/status", (request, response) => {
+  const proof = getStoredProof(request.params.proofId);
+  if (!proof) {
+    response.status(404).json({ error: "proof not found." });
+    return;
+  }
+
+  const verification = verifyProof(proof);
+  recordVerificationAudit(proof, verification);
+  response.json({
+    proofId: request.params.proofId,
+    status: proof.validity,
+    verification,
+  });
+});
+
 app.get("/api/proofs/:proofId/public", (request, response) => {
+  const proof = getStoredProof(request.params.proofId);
+  if (!proof) {
+    response.status(404).json({ error: "proof not found." });
+    return;
+  }
+
+  const verification = verifyProof(proof);
+  recordVerificationAudit(proof, verification);
+  response.json({
+    proof,
+    verification,
+  });
+});
+
+app.post("/api/proofs/:proofId/public", (request, response) => {
   const proof = getStoredProof(request.params.proofId);
   if (!proof) {
     response.status(404).json({ error: "proof not found." });

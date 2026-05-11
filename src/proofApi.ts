@@ -74,7 +74,23 @@ type ProofIssueResponse = {
   };
 };
 
-const API_BASE = import.meta.env.VITE_PROOFRENT_API_URL ?? "";
+const configuredApiBase = (import.meta.env.VITE_PROOFRENT_API_URL ?? "").trim().replace(/\/$/, "");
+
+const isLocalHost = (hostname: string) =>
+  hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+
+const getApiBase = () => {
+  if (!configuredApiBase) return "";
+  if (typeof window === "undefined") return configuredApiBase;
+
+  const configuredUrl = new URL(configuredApiBase, window.location.origin);
+  const currentHostIsLocal = isLocalHost(window.location.hostname);
+  const configuredHostIsLocal = isLocalHost(configuredUrl.hostname);
+
+  return !currentHostIsLocal && configuredHostIsLocal ? "" : configuredApiBase;
+};
+
+const API_BASE = getApiBase();
 
 const postJson = async <T,>(path: string, body: unknown): Promise<T> => {
   const response = await fetch(`${API_BASE}${path}`, {
