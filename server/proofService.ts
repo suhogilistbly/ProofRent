@@ -1,18 +1,8 @@
 import { randomBytes, createHash } from "node:crypto";
-import { PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import nacl from "tweetnacl";
 import type { Proof } from "../src/types.js";
-import { MagicBlockPERAdapter } from "./magicblock/MagicBlockPERAdapter.js";
 import { getMagicBlockMode, getMagicBlockServerConfig } from "./magicblock/accessControl.js";
-import {
-  clearProofCommitmentStoreForTests,
-  isProofCommitmentConfigured,
-  revokeProofCommitment,
-  settleProofCommitment,
-  verifyProofCommitment,
-  type ProofCommitmentRecord,
-} from "./solana/proofCommitmentRegistry.js";
 
 type PrivateFinancialProfile = {
   monthlyIncome: number;
@@ -73,6 +63,29 @@ export type ProofVerificationResult = {
 
 type AuditAction = "proof.issue" | "proof.verify" | "proof.revoke" | "request.replay_blocked" | "request.validation_failed";
 
+type ProofCommitment = {
+  proofHash: string;
+  proofId: string;
+  tenantWallet: string;
+  issuer: string;
+  issuedAt: string;
+  expiresAt: string;
+  revoked: boolean;
+};
+
+type ProofCommitmentRecord = {
+  configured: boolean;
+  status: NonNullable<Proof["onChainCommitment"]>["status"];
+  proofHash: string;
+  transactionSignature?: string;
+  slot?: number;
+  commitmentAddress?: string;
+  committedAt?: string;
+  settlementType?: "program" | "memo";
+  reason?: string;
+  commitment?: ProofCommitment;
+};
+
 export type AuditEvent = {
   id: string;
   action: AuditAction;
@@ -112,6 +125,60 @@ const ordered = <T extends Record<string, unknown>>(value: T): T =>
 const randomHex = (length: number) => randomBytes(Math.ceil(length / 2)).toString("hex").slice(0, length);
 
 const generateProofId = () => `0x${randomHex(12 + Math.floor(Math.random() * 5))}`;
+
+const solanaRpcUrl = () => process.env.SERVER_SOLANA_RPC_URL?.trim() ?? process.env.SOLANA_RPC_URL?.trim();
+const solanaPayerSecret = () => process.env.SERVER_SOLANA_PAYER_SECRET_KEY?.trim() ?? process.env.SOLANA_PAYER_SECRET_KEY?.trim();
+export const isSolanaSettlementConfigured = () => Boolean(solanaRpcUrl() && solanaPayerSecret());
+
+const notConfiguredCommitment = (proofHash: string, commitment?: ProofCommitment): ProofCommitmentRecord => ({
+  configured: false,
+  status: "not_configured",
+  proofHash,
+  reason: "Solana settlement not configured",
+  commitment,
+});
+
+const commitmentFromProof = (proof: Proof): ProofCommitmentRecord | undefined => {
+  if (!proof.proofHash) return undefined;
+  if (!isSolanaSettlementConfigured()) return notConfiguredCommitment(proof.proofHash);
+  if (!proof.onChainCommitment) {
+    return {
+      configured: true,
+      status: "missing",
+      proofHash: proof.proofHash,
+      reason: "No Solana commitment found for this proof",
+    };
+  }
+  return {
+    configured: proof.onChainCommitment.configured,
+    status: proof.onChainCommitment.status,
+    proofHash: proof.proofHash,
+    transactionSignature: proof.onChainCommitment.transactionSignature,
+    slot: proof.onChainCommitment.slot,
+    commitmentAddress: proof.onChainCommitment.commitmentAddress,
+    committedAt: proof.onChainCommitment.committedAt,
+    settlementType: proof.onChainCommitment.settlementType,
+    reason: proof.onChainCommitment.reason,
+  };
+};
+
+const settleCommitment = async (commitment: ProofCommitment): Promise<ProofCommitmentRecord> => {
+  if (!isSolanaSettlementConfigured()) return notConfiguredCommitment(commitment.proofHash, commitment);
+  const { settleProofCommitment } = await import("./solana/proofCommitmentRegistry.js");
+  return settleProofCommitment(commitment);
+};
+
+const revokeCommitment = async (proofHash: string): Promise<ProofCommitmentRecord> => {
+  if (!isSolanaSettlementConfigured()) return notConfiguredCommitment(proofHash);
+  const { revokeProofCommitment } = await import("./solana/proofCommitmentRegistry.js");
+  return revokeProofCommitment(proofHash);
+};
+
+const decodeSolanaPublicKey = (value: string) => {
+  const decoded = bs58.decode(value);
+  if (decoded.length !== 32) throw new Error("Invalid Solana public key length.");
+  return decoded;
+};
 
 const addDays = (date: Date, days: number) => {
   const next = new Date(date);
@@ -291,7 +358,7 @@ const validateRequestAuthorization = (request: Partial<ProofIssueRequest>, now =
   }
 
   try {
-    if (request.tenantWallet) new PublicKey(request.tenantWallet);
+    if (request.tenantWallet) decodeSolanaPublicKey(request.tenantWallet);
   } catch {
     errors.push("tenantWallet must be a valid Solana public key.");
   }
@@ -384,11 +451,11 @@ const verifyRequestSignature = (request: ProofIssueRequest) => {
   if (request.requestSignature.message && request.requestSignature.message !== request.requestMessage) return false;
 
   try {
-    const publicKey = new PublicKey(request.tenantWallet);
+    const publicKeyBytes = decodeSolanaPublicKey(request.tenantWallet);
     return nacl.sign.detached.verify(
       encoder.encode(request.requestMessage),
       bs58.decode(request.requestSignature.value),
-      publicKey.toBytes(),
+      publicKeyBytes,
     );
   } catch {
     return false;
@@ -469,6 +536,7 @@ export const issueProof = async (request: ProofIssueRequest) => {
       );
     }
 
+    const { MagicBlockPERAdapter } = await import("./magicblock/MagicBlockPERAdapter.js");
     const adapterResult = await new MagicBlockPERAdapter(magicBlockConfig).executePrivateProofJob({
       propertyId: request.propertyId,
       rent: request.rent,
@@ -623,7 +691,7 @@ const attachOnChainCommitment = (proof: Proof, commitment: ProofCommitmentRecord
 export const issueProofWithSettlement = async (request: ProofIssueRequest) => {
   const result = await issueProof(request);
   if (result.proof.proofHash) {
-    const commitment = await settleProofCommitment({
+    const commitmentPayload = {
       proofHash: result.proof.proofHash,
       proofId: result.proof.proofId || result.proof.id,
       tenantWallet: result.proof.tenantWallet,
@@ -631,7 +699,8 @@ export const issueProofWithSettlement = async (request: ProofIssueRequest) => {
       issuedAt: result.proof.issuedAt,
       expiresAt: result.proof.expiresAt,
       revoked: false,
-    });
+    };
+    const commitment = await settleCommitment(commitmentPayload);
     attachOnChainCommitment(result.proof, commitment);
     issuedProofs.set(result.proof.proofId || result.proof.id, result.proof);
   }
@@ -692,7 +761,7 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
     }
   }
 
-  const commitmentStatus = proof.proofHash ? verifyProofCommitment(proof.proofHash) : undefined;
+  const commitmentStatus = commitmentFromProof(proof);
   if (commitmentStatus) attachOnChainCommitment(proof, commitmentStatus);
   const onChainCommitmentConfigured = Boolean(commitmentStatus?.configured);
   const onChainCommitmentValid =
@@ -769,7 +838,7 @@ export const revokeProofWithSettlement = async (proofId: string, reason: string)
   revokeProof(proofId, reason);
   const proof = issuedProofs.get(proofId);
   if (proof?.proofHash) {
-    const commitment = await revokeProofCommitment(proof.proofHash);
+    const commitment = await revokeCommitment(proof.proofHash);
     attachOnChainCommitment(proof, commitment);
   }
   return proof;
@@ -796,6 +865,5 @@ export const clearProofSecurityStateForTests = () => {
   nonceStore.clear();
   revokedProofs.clear();
   issuedProofs.clear();
-  clearProofCommitmentStoreForTests();
   auditLog.length = 0;
 };

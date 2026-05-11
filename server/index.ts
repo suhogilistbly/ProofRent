@@ -1,11 +1,11 @@
 import express from "express";
 import cors from "cors";
-import { MagicBlockPERAdapter } from "./magicblock/MagicBlockPERAdapter.js";
 import { getMagicBlockMode, getMagicBlockServerConfig } from "./magicblock/accessControl.js";
 import {
   getAuditLog,
   getStoredProof,
   getServicePublicKey,
+  isSolanaSettlementConfigured,
   issueProofWithSettlement,
   recordVerificationAudit,
   revokeProofWithSettlement,
@@ -45,6 +45,18 @@ app.post("/api/health", (_request, response) => {
   response.json({
     ...healthPayload(),
     method: "POST",
+  });
+});
+
+app.get("/api/debug/runtime", (_request, response) => {
+  const magicBlockConfig = getMagicBlockServerConfig();
+  response.json({
+    ok: true,
+    nodeVersion: process.version,
+    vercelRuntimeDetected: Boolean(process.env.VERCEL),
+    signingSeedConfigured: Boolean(process.env.PROOFRENT_SIGNING_SEED),
+    solanaConfigured: isSolanaSettlementConfigured(),
+    magicblockConfigured: getMagicBlockMode(magicBlockConfig) === "magicblock-real",
   });
 });
 
@@ -94,6 +106,7 @@ app.post("/api/magicblock/test/per-adapter", async (request, response) => {
       return;
     }
 
+    const { MagicBlockPERAdapter } = await import("./magicblock/MagicBlockPERAdapter.js");
     const result = await new MagicBlockPERAdapter(config).executePrivateProofJob({
       propertyId: request.body?.propertyId ?? "diagnostic-property",
       rent: Number(request.body?.rent ?? 800),
