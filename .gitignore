@@ -17,6 +17,7 @@ logs/
 .cache/
 .vite/
 .turbo/
+.vercel/
 tmp/
 temp/
 

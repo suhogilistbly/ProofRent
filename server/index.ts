@@ -240,6 +240,10 @@ app.get("/api/audit", (_request, response) => {
   });
 });
 
-app.listen(port, () => {
-  console.log(`ProofRent simulated confidential execution service listening on http://localhost:${port}`);
-});
+export default app;
+
+if (!process.env.VERCEL) {
+  app.listen(port, () => {
+    console.log(`ProofRent simulated confidential execution service listening on http://localhost:${port}`);
+  });
+}

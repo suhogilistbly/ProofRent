@@ -66,6 +66,22 @@ npm run dev
 
 Open the Vite URL, usually `http://localhost:5173`.
 
+## Vercel Deploy
+
+This repo includes a Vercel serverless API entrypoint at `api/[...path].ts`. Deploy the whole repository, not only the `dist` folder. The frontend can use same-origin API calls, so `VITE_PROOFRENT_API_URL` may stay blank on Vercel.
+
+Required Vercel settings:
+- Build command: `npm run build`
+- Output directory: `dist`
+- Install command: `npm install`
+
+Optional environment variables:
+- `PROOFRENT_SIGNING_SEED` if you want issued proofs to remain verifiable across serverless cold starts and redeploys.
+- MagicBlock variables only if you have real MagicBlock endpoints.
+- Solana payer variables only if you want real devnet settlement.
+
+If `/api/health` returns JSON, the proof API is deployed correctly. If proof issuance shows `ProofRent API request failed with 404`, the API function is missing or the project was deployed as a static-only build.
+
 ## Scripts
 
 - `npm run dev` starts the frontend.
