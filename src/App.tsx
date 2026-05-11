@@ -137,6 +137,59 @@ const isLocallyAcceptedForLandlord = (proof?: Proof | null) => {
 const canAcceptForLandlord = (proof?: Proof | null, verification?: BackendProofVerificationResult | null) =>
   Boolean(proof && isBackendAcceptedForLandlord(verification));
 
+const ACCEPT_SUCCESS_MESSAGE = "Applicant accepted";
+const BACKEND_UNAVAILABLE_MESSAGE = "Backend verification unavailable";
+
+type AcceptResult = {
+  ok: boolean;
+  message: string;
+  application?: Application;
+  verification?: BackendProofVerificationResult;
+};
+
+const backendVerificationErrorMessage = (error: unknown) => {
+  if (error instanceof TypeError) return BACKEND_UNAVAILABLE_MESSAGE;
+  if (error instanceof Error && /failed to fetch|network|load failed|api request failed with 404/i.test(error.message)) {
+    return BACKEND_UNAVAILABLE_MESSAGE;
+  }
+  return error instanceof Error ? error.message : "Backend verification failed.";
+};
+
+const verifyAndAcceptApplication = async (
+  application: Application,
+  proof: Proof,
+): Promise<AcceptResult> => {
+  if (!isLocallyAcceptedForLandlord(proof)) {
+    return {
+      ok: false,
+      message: "Proof is not valid for landlord acceptance.",
+    };
+  }
+
+  try {
+    const { verification } = await verifyProofBackend(proof);
+    if (!canAcceptForLandlord(proof, verification)) {
+      return {
+        ok: false,
+        message: verification.reason,
+        verification,
+      };
+    }
+
+    return {
+      ok: true,
+      message: ACCEPT_SUCCESS_MESSAGE,
+      application: acceptApplication(application.id, true),
+      verification,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: backendVerificationErrorMessage(error),
+    };
+  }
+};
+
 function SolanaTransactionLink({ proof }: { proof: Proof }) {
   const signature = proof.solanaTxSignature ?? proof.onChainCommitment?.transactionSignature;
   const explorerUrl = solanaDevnetExplorerUrl(signature);
@@ -2366,15 +2419,21 @@ function LandlordPage() {
   const onAccept = async (applicationId: string) => {
     const application = applications.find((item) => item.id === applicationId);
     const proof = proofs.find((item) => item.id === application?.proofId || item.proofId === application?.proofId);
-    if (!proof || !isLocallyAcceptedForLandlord(proof)) return;
-    try {
-      const { verification } = await verifyProofBackend(proof);
-      if (!canAcceptForLandlord(proof, verification)) return;
-    } catch {
-      return;
+    if (!application) {
+      return {
+        ok: false,
+        message: "Application not found.",
+      };
     }
-    acceptApplication(applicationId, true);
-    refresh();
+    if (!proof) {
+      return {
+        ok: false,
+        message: "Proof not found.",
+      };
+    }
+    const result = await verifyAndAcceptApplication(application, proof);
+    if (result.ok) refresh();
+    return result;
   };
 
   const onReject = (applicationId: string) => {
@@ -2411,35 +2470,36 @@ function LandlordApplicationPage() {
   const demoAccept = searchParams.get("demo") === "accept";
   const [backendVerification, setBackendVerification] = useState<BackendProofVerificationResult | null>(null);
   const [backendVerificationError, setBackendVerificationError] = useState<string | null>(null);
+  const [acceptLoading, setAcceptLoading] = useState(false);
+  const [acceptSuccess, setAcceptSuccess] = useState<string | null>(null);
   const proofVerification = backendVerification;
 
   const proofCanBeAccepted = canAcceptForLandlord(proof, proofVerification);
   const approved = Boolean(proof && proofCanBeAccepted);
   const onAccept = async () => {
     if (!application || !proof) return;
-    if (!isLocallyAcceptedForLandlord(proof)) {
-      setBackendVerificationError("Proof is not valid for landlord acceptance.");
-      return;
+    setAcceptLoading(true);
+    setAcceptSuccess(null);
+    setBackendVerificationError(null);
+    const result = await verifyAndAcceptApplication(application, proof);
+    if (result.verification) {
+      setBackendVerification(result.verification);
     }
-    try {
-      const { verification } = await verifyProofBackend(proof);
-      setBackendVerification(verification);
-      if (!canAcceptForLandlord(proof, verification)) {
-        setBackendVerificationError(verification.reason);
-        return;
-      }
+    if (result.ok) {
+      setApplication(result.application);
+      setAcceptSuccess(result.message);
       setBackendVerificationError(null);
-    } catch {
-      setBackendVerification(null);
-      setBackendVerificationError("Backend verification is required before accepting an applicant.");
-      return;
+    } else {
+      setBackendVerificationError(result.message);
+      if (!result.verification) setBackendVerification(null);
     }
-    setApplication(acceptApplication(application.id, true));
+    setAcceptLoading(false);
   };
 
   const onReject = () => {
     if (!application) return;
     setApplication(rejectApplication(application.id));
+    setAcceptSuccess(null);
   };
 
   useEffect(() => {
@@ -2447,11 +2507,11 @@ function LandlordApplicationPage() {
     verifyProofBackend(proof)
       .then(({ verification }) => {
         setBackendVerification(verification);
-        setBackendVerificationError(verification.valid ? null : verification.reason);
+        setBackendVerificationError(isBackendAcceptedForLandlord(verification) ? null : verification.reason);
       })
       .catch((error) => {
         setBackendVerification(null);
-        setBackendVerificationError(error instanceof Error ? error.message : "Backend verification failed.");
+        setBackendVerificationError(backendVerificationErrorMessage(error));
       });
   }, [proof?.id]);
 
@@ -2540,14 +2600,24 @@ function LandlordApplicationPage() {
               Backend verification: {backendVerificationError}
             </p>
           ) : null}
+          {acceptSuccess ? (
+            <p className="mt-7 rounded-2xl border border-verified-100 bg-verified-50 p-4 text-sm font-bold text-verified-700">
+              {acceptSuccess}
+            </p>
+          ) : null}
+          {acceptLoading ? (
+            <p className="mt-7 rounded-2xl border border-amber-100 bg-amber-50 p-4 text-sm font-bold text-amber-800">
+              Verifying proof...
+            </p>
+          ) : null}
 
           <p className="mt-7 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-semibold leading-6 text-slate-600">
             Raw income, expenses, savings, debt, and bank statements are never shown to the landlord. Only the reusable passport fields are shared.
           </p>
 
           <div className="mt-7 flex flex-col gap-3 sm:flex-row">
-            <Button onClick={onAccept} disabled={application.status === "accepted"}>
-              Accept applicant <CheckCircle2 className="h-4 w-4" />
+            <Button onClick={onAccept} disabled={application.status === "accepted" || acceptLoading}>
+              {acceptLoading ? "Verifying proof..." : "Accept applicant"} <CheckCircle2 className="h-4 w-4" />
             </Button>
             <Button variant="danger" onClick={onReject} disabled={application.status === "rejected"}>
               Reject application
@@ -2567,8 +2637,8 @@ function LandlordApplicationPage() {
               Contact details stay locked until the proof outcome is accepted. No raw financial documents are available.
             </p>
             <div className="mt-6 grid gap-3">
-              <Button onClick={onAccept} disabled={application.status === "accepted"}>
-                Accept applicant <CheckCircle2 className="h-4 w-4" />
+              <Button onClick={onAccept} disabled={application.status === "accepted" || acceptLoading}>
+                {acceptLoading ? "Verifying proof..." : "Accept applicant"} <CheckCircle2 className="h-4 w-4" />
               </Button>
               <Button variant="danger" onClick={onReject} disabled={application.status === "rejected"}>Reject application</Button>
               <Button variant="secondary" onClick={() => navigate(`/verify-proof/${proof.id}`)}>

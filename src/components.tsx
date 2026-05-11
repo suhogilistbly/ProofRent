@@ -338,11 +338,14 @@ export function LandlordDashboard({
   onReject,
 }: {
   rows: Array<{ application: Application; proof?: Proof; property?: Property }>;
-  onAccept: (applicationId: string) => void | Promise<void>;
+  onAccept: (applicationId: string) => void | Promise<{ ok: boolean; message: string } | undefined>;
   onReject: (applicationId: string) => void;
 }) {
   const [verificationByProofId, setVerificationByProofId] = useState<Record<string, ProofVerificationResult>>({});
   const [verificationUnavailableByProofId, setVerificationUnavailableByProofId] = useState<Record<string, string>>({});
+  const [acceptLoadingByApplicationId, setAcceptLoadingByApplicationId] = useState<Record<string, boolean>>({});
+  const [acceptMessageByApplicationId, setAcceptMessageByApplicationId] = useState<Record<string, string>>({});
+  const [acceptErrorByApplicationId, setAcceptErrorByApplicationId] = useState<Record<string, string>>({});
 
   useEffect(() => {
     rows.forEach(({ proof }) => {
@@ -361,6 +364,39 @@ export function LandlordDashboard({
     });
   }, [rows]);
 
+  const runAccept = async (applicationId: string) => {
+    setAcceptLoadingByApplicationId((current) => ({ ...current, [applicationId]: true }));
+    setAcceptMessageByApplicationId((current) => {
+      const next = { ...current };
+      delete next[applicationId];
+      return next;
+    });
+    setAcceptErrorByApplicationId((current) => {
+      const next = { ...current };
+      delete next[applicationId];
+      return next;
+    });
+
+    try {
+      const result = await onAccept(applicationId);
+      if (result?.ok) {
+        setAcceptMessageByApplicationId((current) => ({ ...current, [applicationId]: result.message }));
+      } else {
+        setAcceptErrorByApplicationId((current) => ({
+          ...current,
+          [applicationId]: result?.message ?? "Backend verification failed.",
+        }));
+      }
+    } catch (error) {
+      setAcceptErrorByApplicationId((current) => ({
+        ...current,
+        [applicationId]: error instanceof Error ? error.message : "Backend verification failed.",
+      }));
+    } finally {
+      setAcceptLoadingByApplicationId((current) => ({ ...current, [applicationId]: false }));
+    }
+  };
+
   if (rows.length === 0) return <EmptyState />;
 
   return (
@@ -372,6 +408,9 @@ export function LandlordDashboard({
             const backendValid = isBackendAcceptedForLandlord(backendVerification);
             const unavailableReason = proof ? verificationUnavailableByProofId[proof.proofId || proof.id] : undefined;
             const verificationUnavailable = Boolean(proof && (!backendVerification || unavailableReason));
+            const acceptLoading = Boolean(acceptLoadingByApplicationId[application.id]);
+            const acceptMessage = acceptMessageByApplicationId[application.id];
+            const acceptError = acceptErrorByApplicationId[application.id];
             return (
           <>
           <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
@@ -386,8 +425,8 @@ export function LandlordDashboard({
               <Link to={`/landlord/application/${application.id}`}>
                 <Button className="w-full sm:w-auto">Review application</Button>
               </Link>
-              <Button className="w-full sm:w-auto" onClick={() => onAccept(application.id)} disabled={application.status === "accepted" || !proof || !backendValid}>
-                Accept
+              <Button className="w-full sm:w-auto" onClick={() => runAccept(application.id)} disabled={application.status === "accepted" || !proof || acceptLoading}>
+                {acceptLoading ? "Verifying proof..." : "Accept"}
               </Button>
               <Button variant="danger" className="w-full sm:w-auto" onClick={() => onReject(application.id)} disabled={application.status === "rejected"}>
                 Reject
@@ -427,6 +466,21 @@ export function LandlordDashboard({
           <p className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm font-semibold leading-6 text-slate-500">
             Raw income, expenses, savings, debt, and bank statements are never shown to the landlord. Only the reusable proof is shared.
           </p>
+          {acceptLoading ? (
+            <p className="mt-5 rounded-2xl border border-amber-100 bg-amber-50 p-4 text-sm font-bold text-amber-800">
+              Verifying proof...
+            </p>
+          ) : null}
+          {acceptMessage ? (
+            <p className="mt-5 rounded-2xl border border-verified-100 bg-verified-50 p-4 text-sm font-bold text-verified-700">
+              {acceptMessage}
+            </p>
+          ) : null}
+          {acceptError ? (
+            <p className="mt-5 rounded-2xl border border-rose-100 bg-rose-50 p-4 text-sm font-bold text-rose-700">
+              {acceptError}
+            </p>
+          ) : null}
           </>
             );
           })()}
