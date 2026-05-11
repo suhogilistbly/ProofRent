@@ -41,26 +41,29 @@ export type Property = {
   requirements: string[];
 };
 
+export type CanonicalProofPayload = {
+  proofId: string;
+  propertyId: string;
+  status: "Tenant Verified" | "Not Verified";
+  riskLevel: "low" | "medium" | "high";
+  score: number;
+  validUntil: string;
+  createdAt: string;
+  checks: {
+    incomeCheck: CheckStatus;
+    cashflowCheck: CheckStatus;
+    savingsCheck: CheckStatus;
+    debtCheck: CheckStatus;
+  };
+  issuer: string;
+  executionMode: string;
+};
+
 export type Proof = {
   id: string;
   proofId: string;
-  signedPayload?: {
-    proofId: string;
-    propertyId: string;
-    status: "Tenant Verified" | "Not Verified";
-    riskLevel: "low" | "medium" | "high";
-    score: number;
-    validUntil: string;
-    createdAt: string;
-    checks: {
-      incomeCheck: CheckStatus;
-      cashflowCheck: CheckStatus;
-      savingsCheck: CheckStatus;
-      debtCheck: CheckStatus;
-    };
-    issuer: string;
-    executionMode: string;
-  };
+  canonicalPayload?: CanonicalProofPayload;
+  signedPayload?: CanonicalProofPayload;
   tenantWallet: string;
   propertyId: string;
   propertyIds: string[];
@@ -108,6 +111,7 @@ export type Proof = {
   };
   attestation?: Attestation;
   signature?: ProofSignature;
+  issuerSignature?: ProofSignature;
   verifierProgram?: string;
   selectiveDisclosure?: string[];
   shareUrlPath?: string;

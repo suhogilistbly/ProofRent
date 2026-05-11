@@ -46,6 +46,14 @@ export type ProofVerificationResult = {
   valid: boolean;
   reason: string;
   diagnostics: string[];
+  integrityDiagnostics: {
+    expectedHash: string;
+    actualHash: string;
+    mismatchedFields: string[];
+    signedPayloadKeys: string[];
+    receivedPayloadKeys: string[];
+    signedPayload: string;
+  };
   expired: boolean;
   signatureValid: boolean;
   integrityValid: boolean;
@@ -89,7 +97,7 @@ type ProofCommitmentRecord = {
   commitment?: ProofCommitment;
 };
 
-type CanonicalProofPayload = NonNullable<Proof["signedPayload"]>;
+type CanonicalProofPayload = NonNullable<Proof["canonicalPayload"]>;
 
 export type AuditEvent = {
   id: string;
@@ -178,6 +186,22 @@ const ordered = <T extends Record<string, unknown>>(value: T): T =>
   Object.keys(value)
     .sort()
     .reduce((result, key) => ({ ...result, [key]: value[key] }), {} as T);
+
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === "object") {
+    return Object.keys(value as Record<string, unknown>)
+      .sort()
+      .reduce<Record<string, unknown>>((result, key) => {
+        const nextValue = (value as Record<string, unknown>)[key];
+        if (nextValue !== undefined) result[key] = canonicalize(nextValue);
+        return result;
+      }, {});
+  }
+  return value;
+};
+
+const canonicalStringify = (value: unknown) => JSON.stringify(canonicalize(value));
 
 loadPersistentStores();
 
@@ -292,9 +316,9 @@ const createCanonicalProofPayload = (proof: Proof): CanonicalProofPayload => ({
 });
 
 const proofPayloadObject = (proof: Proof): CanonicalProofPayload =>
-  proof.signedPayload ?? createCanonicalProofPayload(proof);
+  proof.canonicalPayload ?? proof.signedPayload ?? createCanonicalProofPayload(proof);
 
-const proofPayload = (proof: Proof) => JSON.stringify(ordered(proofPayloadObject(proof)));
+const proofPayload = (proof: Proof) => canonicalStringify(proofPayloadObject(proof));
 
 const proofMessage = (proof: Proof) => `ProofRent signed rental proof\n${proofPayload(proof)}`;
 
@@ -303,8 +327,8 @@ const hashText = (value: string) => `sha512_${Buffer.from(nacl.hash(encoder.enco
 const proofHash = (proof: Proof) => hashText(proofMessage(proof));
 
 const attestationPayload = (attestation: NonNullable<Proof["attestation"]>) =>
-  JSON.stringify(
-    ordered({
+  canonicalStringify(
+    {
       attestationId: attestation.attestationId,
       executionEnvironment: attestation.executionEnvironment,
       expiresAt: attestation.expiresAt,
@@ -312,7 +336,7 @@ const attestationPayload = (attestation: NonNullable<Proof["attestation"]>) =>
       issuer: attestation.issuer,
       issuerPublicKey: attestation.issuerPublicKey,
       proofHash: attestation.proofHash,
-    }),
+    },
   );
 
 const attestationMessage = (attestation: NonNullable<Proof["attestation"]>) =>
@@ -321,21 +345,23 @@ const attestationMessage = (attestation: NonNullable<Proof["attestation"]>) =>
 const attestationHash = (attestation: NonNullable<Proof["attestation"]>) => hashText(attestationMessage(attestation));
 
 const getProofIssuer = (proof: Proof) => proof.issuerPublicKey ?? proof.signature?.signer;
+const getIssuerSignature = (proof: Proof) => proof.issuerSignature ?? proof.signature;
 const getAttestationIssuer = (proof: Proof) => proof.attestation?.issuerPublicKey ?? proof.attestation?.issuer;
 const getAttestationSignature = (proof: Proof) => proof.attestation?.attestationSignature ?? proof.attestation?.signature;
 
 const verifyTrustedIssuer = (proof: Proof) => {
+  const issuerSignature = getIssuerSignature(proof);
   const proofIssuer = getProofIssuer(proof);
   const attestationIssuer = getAttestationIssuer(proof);
   const attestationSignature = getAttestationSignature(proof);
 
-  if (!proofIssuer || !attestationIssuer || !proof.signature?.signer || !attestationSignature?.signer) {
+  if (!proofIssuer || !attestationIssuer || !issuerSignature?.signer || !attestationSignature?.signer) {
     return { valid: false, reason: "Proof is missing required issuer fields." };
   }
   if (proofIssuer !== trustedProofIssuerPublicKey || attestationIssuer !== trustedProofIssuerPublicKey) {
     return { valid: false, reason: "Proof was signed by an unknown issuer." };
   }
-  if (proof.signature.signer !== trustedProofIssuerPublicKey || attestationSignature.signer !== trustedProofIssuerPublicKey) {
+  if (issuerSignature.signer !== trustedProofIssuerPublicKey || attestationSignature.signer !== trustedProofIssuerPublicKey) {
     return { valid: false, reason: "Proof or attestation signature was not produced by the trusted issuer." };
   }
   if (proof.attestation?.issuer && proof.attestation.issuer !== trustedProofIssuerPublicKey) {
@@ -678,9 +704,11 @@ export const issueProof = async (request: ProofIssueRequest) => {
     createdAt: issuedAt.toISOString(),
   };
 
-  proof.signedPayload = createCanonicalProofPayload(proof);
+  proof.canonicalPayload = createCanonicalProofPayload(proof);
+  proof.signedPayload = proof.canonicalPayload;
   proof.proofHash = proofHash(proof);
-  proof.signature = signProof(proof);
+  proof.issuerSignature = signProof(proof);
+  proof.signature = proof.issuerSignature;
   const unsignedAttestation = {
     attestationId: `att_${randomHex(16)}`,
     proofHash: proof.proofHash,
@@ -780,6 +808,8 @@ export const issueProofWithSettlement = async (request: ProofIssueRequest) => {
 
 export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationResult => {
   const proofId = proof.proofId || proof.id;
+  const issuerSignature = getIssuerSignature(proof);
+  const canonicalPayload = proofPayloadObject(proof);
   const expired = Date.parse(proof.expiresAt) <= now.getTime();
   const attestationExpired = proof.attestation ? Date.parse(proof.attestation.expiresAt) <= now.getTime() : true;
   const storedProof = issuedProofs.get(proofId);
@@ -790,13 +820,36 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
   const actualAttestationProofHash = proof.attestation?.proofHash ?? "";
   const signedPayload = proofPayload(proof);
   const attestationSignature = getAttestationSignature(proof);
+  const mismatchedFields = [
+    proof.id !== proof.proofId ? "proofId" : undefined,
+    !proof.canonicalPayload ? "canonicalPayload" : undefined,
+    canonicalPayload.proofId !== proofId ? "canonicalPayload.proofId" : undefined,
+    canonicalPayload.propertyId !== proof.propertyId ? "canonicalPayload.propertyId" : undefined,
+    canonicalPayload.issuer !== proof.issuerPublicKey ? "canonicalPayload.issuer" : undefined,
+    proof.proofHash !== expectedProofHash ? "proofHash" : undefined,
+    proof.attestation?.proofHash !== expectedProofHash ? "attestation.proofHash" : undefined,
+    issuerSignature?.message !== proofMessage(proof) ? "issuerSignature.message" : undefined,
+    proof.attestation?.attestationHash !== (proof.attestation ? attestationHash(proof.attestation) : "") ? "attestation.attestationHash" : undefined,
+    attestationSignature?.message !== (proof.attestation ? attestationMessage(proof.attestation) : "") ? "attestationSignature.message" : undefined,
+  ].filter((field): field is string => Boolean(field));
+  const signedPayloadKeys = Object.keys(canonicalPayload).sort();
+  const receivedPayloadKeys = Object.keys(proof).sort();
+  const integrityDiagnostics = {
+    expectedHash: expectedProofHash,
+    actualHash: actualProofHash || "missing",
+    mismatchedFields,
+    signedPayloadKeys,
+    receivedPayloadKeys,
+    signedPayload,
+  };
   const integrityValid =
     proof.id === proof.proofId &&
-    proof.signedPayload?.proofId === proofId &&
-    proof.signedPayload?.propertyId === proof.propertyId &&
-    proof.signature?.scheme === "ed25519" &&
-    proof.signature.message === proofMessage(proof) &&
-    proof.signedPayload?.issuer === proof.issuerPublicKey &&
+    Boolean(proof.canonicalPayload) &&
+    canonicalPayload.proofId === proofId &&
+    canonicalPayload.propertyId === proof.propertyId &&
+    issuerSignature?.scheme === "ed25519" &&
+    issuerSignature.message === proofMessage(proof) &&
+    canonicalPayload.issuer === proof.issuerPublicKey &&
     proof.proofHash === expectedProofHash &&
     proof.attestationStatus === "attested" &&
     Boolean(proof.attestation?.attestationId) &&
@@ -811,12 +864,12 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
   const proofHashValid = Boolean(proof.attestation) && proof.attestation?.proofHash === expectedProofHash && proof.proofHash === expectedProofHash;
 
   let signatureValid = false;
-  if (proof.signature?.scheme === "ed25519" && proof.signature.message === proofMessage(proof)) {
+  if (issuerSignature?.scheme === "ed25519" && issuerSignature.message === proofMessage(proof)) {
     try {
       signatureValid = nacl.sign.detached.verify(
         encoder.encode(proofMessage(proof)),
-        bs58.decode(proof.signature.value),
-        bs58.decode(proof.signature.signer),
+        bs58.decode(issuerSignature.value),
+        bs58.decode(issuerSignature.signer),
       );
     } catch {
       signatureValid = false;
@@ -872,7 +925,8 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
     `signed payload: ${signedPayload}`,
     actualProofHash && actualProofHash !== expectedProofHash ? "proof hash mismatch" : undefined,
     actualAttestationProofHash && actualAttestationProofHash !== expectedProofHash ? "attestation proof hash mismatch" : undefined,
-    proof.signature?.message && proof.signature.message !== proofMessage(proof) ? "signed message mismatch" : undefined,
+    issuerSignature?.message && issuerSignature.message !== proofMessage(proof) ? "signed message mismatch" : undefined,
+    mismatchedFields.length ? `mismatched fields: ${mismatchedFields.join(", ")}` : undefined,
     !trustedIssuer.valid ? "issuer mismatch" : undefined,
     !signatureValid || !attestationSignatureValid ? "signature invalid" : undefined,
     expired || attestationExpired ? "expired" : undefined,
@@ -901,6 +955,7 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
                 : "Proof is not in an active reusable state."
             : "Proof integrity, expiration, proof hash, and signatures are valid.",
     diagnostics,
+    integrityDiagnostics,
     expired,
     signatureValid,
     integrityValid,

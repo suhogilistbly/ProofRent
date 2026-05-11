@@ -51,6 +51,19 @@ export function BackendVerificationBadge({
   return <Badge tone="rose">Backend rejected</Badge>;
 }
 
+const verificationDiagnosticsText = (verification?: ProofVerificationResult) => {
+  if (!verification) return "Verification unavailable";
+  const details = verification.integrityDiagnostics;
+  return [
+    ...verification.diagnostics,
+    details ? `expectedHash=${details.expectedHash}` : undefined,
+    details ? `actualHash=${details.actualHash}` : undefined,
+    details?.mismatchedFields.length ? `mismatchedFields=${details.mismatchedFields.join("|")}` : undefined,
+    details ? `signedPayloadKeys=${details.signedPayloadKeys.join("|")}` : undefined,
+    details ? `receivedPayloadKeys=${details.receivedPayloadKeys.join("|")}` : undefined,
+  ].filter(Boolean).join(", ");
+};
+
 export const isSimulationOnlyProof = (proof?: Proof) =>
   proof?.executionMetadata?.provider === "local-simulation" || proof?.onChainCommitment?.configured === false;
 
@@ -455,7 +468,7 @@ export function LandlordDashboard({
                     : <Badge tone="rose">{unavailableReason ?? backendVerification?.reason ?? "Backend rejected"}</Badge>
               }
             />
-            <Metric label="Diagnostics" value={backendVerification?.diagnostics?.join(", ") ?? unavailableReason ?? "Verification unavailable"} />
+            <Metric label="Diagnostics" value={backendVerification ? verificationDiagnosticsText(backendVerification) : unavailableReason ?? "Verification unavailable"} />
             <Metric
               label="Execution mode"
               value={isSimulationOnlyProof(proof) ? <Badge tone="amber">Simulation only</Badge> : <Badge tone="green">Backend issued</Badge>}

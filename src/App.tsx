@@ -137,6 +137,19 @@ const isLocallyAcceptedForLandlord = (proof?: Proof | null) => {
 const canAcceptForLandlord = (proof?: Proof | null, verification?: BackendProofVerificationResult | null) =>
   Boolean(proof && isBackendAcceptedForLandlord(verification));
 
+const verificationDiagnosticsText = (verification?: BackendProofVerificationResult | null) => {
+  if (!verification) return "Verification unavailable";
+  const details = verification.integrityDiagnostics;
+  return [
+    ...verification.diagnostics,
+    `expectedHash=${details.expectedHash}`,
+    `actualHash=${details.actualHash}`,
+    details.mismatchedFields.length ? `mismatchedFields=${details.mismatchedFields.join("|")}` : undefined,
+    `signedPayloadKeys=${details.signedPayloadKeys.join("|")}`,
+    `receivedPayloadKeys=${details.receivedPayloadKeys.join("|")}`,
+  ].filter(Boolean).join(", ");
+};
+
 const ACCEPT_SUCCESS_MESSAGE = "Applicant accepted";
 const BACKEND_UNAVAILABLE_MESSAGE = "Backend verification unavailable";
 
@@ -2579,7 +2592,7 @@ function LandlordApplicationPage() {
             <ApplicationDetail label="Risk category" value={<RiskBadge risk={proof.riskCategory} />} />
             <ApplicationDetail label="Validity" value={validityLabel(proof)} />
             <ApplicationDetail label="Backend verification" value={<BackendVerificationBadge verification={proofVerification} unavailable={!proofVerification && !backendVerificationError} />} />
-            <ApplicationDetail label="Diagnostics" value={proofVerification?.diagnostics?.join(", ") ?? "Verification unavailable"} />
+            <ApplicationDetail label="Diagnostics" value={verificationDiagnosticsText(proofVerification)} />
             <ApplicationDetail label="Execution mode" value={isSimulationOnlyProof(proof) ? <Badge tone="amber">Simulation only</Badge> : <Badge tone="green">Backend issued</Badge>} />
             <ApplicationDetail label="Attestation" value={proofVerification ? <AttestationStateBadge verification={proofVerification} /> : "Verification unavailable"} />
             <ApplicationDetail label="Proof ID" value={proof.id} />
@@ -2794,7 +2807,7 @@ function PublicProofPage() {
               <ApplicationDetail label="Proof ID" value={proof.id} />
               <ApplicationDetail label="Tenant Wallet" value={proof.tenantWallet} />
               <ApplicationDetail label="Backend verification" value={<BackendVerificationBadge verification={backendVerification} unavailable={!backendVerification && !backendVerificationError} />} />
-              <ApplicationDetail label="Diagnostics" value={backendVerification?.diagnostics?.join(", ") ?? "Verification unavailable"} />
+              <ApplicationDetail label="Diagnostics" value={verificationDiagnosticsText(backendVerification)} />
               <ApplicationDetail label="Execution mode" value={isSimulationOnlyProof(proof) ? <Badge tone="amber">Simulation only</Badge> : <Badge tone="green">Backend issued</Badge>} />
               <ApplicationDetail label="Signature" value={verification?.signatureValid ? "Verified" : "Verification unavailable"} />
               <ApplicationDetail label="Integrity" value={verification ? (verification.integrityValid ? "Valid" : "Tampered") : "Verification unavailable"} />

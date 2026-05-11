@@ -12,6 +12,14 @@ export type ProofVerificationResult = {
   valid: boolean;
   reason: string;
   diagnostics?: string[];
+  integrityDiagnostics?: {
+    expectedHash: string;
+    actualHash: string;
+    mismatchedFields: string[];
+    signedPayloadKeys: string[];
+    receivedPayloadKeys: string[];
+    signedPayload: string;
+  };
   expired: boolean;
   signatureValid: boolean;
   integrityValid: boolean;
@@ -28,6 +36,22 @@ const ordered = <T extends Record<string, unknown>>(value: T): T =>
     .sort()
     .reduce((result, key) => ({ ...result, [key]: value[key] }), {} as T);
 
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === "object") {
+    return Object.keys(value as Record<string, unknown>)
+      .sort()
+      .reduce<Record<string, unknown>>((result, key) => {
+        const nextValue = (value as Record<string, unknown>)[key];
+        if (nextValue !== undefined) result[key] = canonicalize(nextValue);
+        return result;
+      }, {});
+  }
+  return value;
+};
+
+const canonicalStringify = (value: unknown) => JSON.stringify(canonicalize(value));
+
 export const getProofId = (proof: Pick<Proof, "id" | "proofId">) => proof.proofId || proof.id;
 
 const proofExecutionMode = (proof: Proof) =>
@@ -36,7 +60,7 @@ const proofExecutionMode = (proof: Proof) =>
   proof.executionProvider ??
   "local-simulation";
 
-export const createCanonicalProofPayload = (proof: Proof): NonNullable<Proof["signedPayload"]> => ({
+export const createCanonicalProofPayload = (proof: Proof): NonNullable<Proof["canonicalPayload"]> => ({
   proofId: getProofId(proof),
   propertyId: proof.propertyId,
   status: proof.status,
@@ -50,7 +74,7 @@ export const createCanonicalProofPayload = (proof: Proof): NonNullable<Proof["si
 });
 
 export const canonicalProofPayload = (proof: Proof) =>
-  JSON.stringify(ordered(proof.signedPayload ?? createCanonicalProofPayload(proof)));
+  canonicalStringify(proof.canonicalPayload ?? proof.signedPayload ?? createCanonicalProofPayload(proof));
 
 export const proofMessage = (proof: Proof) =>
   `ProofRent signed rental proof\n${canonicalProofPayload(proof)}`;
@@ -60,8 +84,8 @@ const hex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16)
 export const proofHash = (proof: Proof) => `sha512_${hex(nacl.hash(encoder.encode(proofMessage(proof))))}`;
 
 export const attestationPayload = (attestation: NonNullable<Proof["attestation"]>) =>
-  JSON.stringify(
-    ordered({
+  canonicalStringify(
+    {
       attestationId: attestation.attestationId,
       executionEnvironment: attestation.executionEnvironment,
       expiresAt: attestation.expiresAt,
@@ -69,7 +93,7 @@ export const attestationPayload = (attestation: NonNullable<Proof["attestation"]
       issuer: attestation.issuer,
       issuerPublicKey: attestation.issuerPublicKey,
       proofHash: attestation.proofHash,
-    }),
+    },
   );
 
 export const attestationMessage = (attestation: NonNullable<Proof["attestation"]>) =>
@@ -79,16 +103,18 @@ export const attestationHash = (attestation: NonNullable<Proof["attestation"]>) 
   `sha512_${hex(nacl.hash(encoder.encode(attestationMessage(attestation))))}`;
 
 const getProofIssuer = (proof: Proof) => proof.issuerPublicKey ?? proof.signature?.signer;
+const getIssuerSignature = (proof: Proof) => proof.issuerSignature ?? proof.signature;
 const getAttestationIssuer = (proof: Proof) => proof.attestation?.issuerPublicKey ?? proof.attestation?.issuer;
 const getAttestationSignature = (proof: Proof) => proof.attestation?.attestationSignature ?? proof.attestation?.signature;
 
 export const verifyTrustedIssuer = (proof: Proof, trustedIssuer = trustedIssuerPublicKey) => {
+  const issuerSignature = getIssuerSignature(proof);
   const proofIssuer = getProofIssuer(proof);
   const attestationIssuer = getAttestationIssuer(proof);
   const attestationSignature = getAttestationSignature(proof);
   const effectiveTrustedIssuer = trustedIssuer || proofIssuer;
 
-  if (!proofIssuer || !attestationIssuer || !proof.signature?.signer || !attestationSignature?.signer) {
+  if (!proofIssuer || !attestationIssuer || !issuerSignature?.signer || !attestationSignature?.signer) {
     return { valid: false, reason: "Proof is missing required issuer fields." };
   }
   if (!effectiveTrustedIssuer) {
@@ -97,7 +123,7 @@ export const verifyTrustedIssuer = (proof: Proof, trustedIssuer = trustedIssuerP
   if (proofIssuer !== effectiveTrustedIssuer || attestationIssuer !== effectiveTrustedIssuer) {
     return { valid: false, reason: "Proof was signed by an unknown issuer." };
   }
-  if (proof.signature.signer !== effectiveTrustedIssuer || attestationSignature.signer !== effectiveTrustedIssuer) {
+  if (issuerSignature.signer !== effectiveTrustedIssuer || attestationSignature.signer !== effectiveTrustedIssuer) {
     return { valid: false, reason: "Proof or attestation signature was not produced by the trusted issuer." };
   }
   if (proof.attestation?.issuer && proof.attestation.issuer !== effectiveTrustedIssuer) {
@@ -121,6 +147,7 @@ export const signProofWithWallet = async (proof: Proof, signMessage: SignMessage
 
 export const validateProofIntegrity = (proof: Proof) => {
   const proofId = getProofId(proof);
+  const issuerSignature = getIssuerSignature(proof);
   const requiredStringFields = [
     proofId,
     proof.tenantWallet,
@@ -137,7 +164,7 @@ export const validateProofIntegrity = (proof: Proof) => {
     proof.attestation?.issuerPublicKey ?? proof.attestation?.issuer,
     proof.attestation?.attestationHash,
     proof.attestation?.executionEnvironment,
-    proof.signature?.value,
+    issuerSignature?.value,
   ];
 
   if (requiredStringFields.some((field) => !field || typeof field !== "string")) {
@@ -148,19 +175,20 @@ export const validateProofIntegrity = (proof: Proof) => {
     return { valid: false, reason: "Proof ID alias does not match canonical proofId." };
   }
 
-  if (!proof.signedPayload) {
-    return { valid: false, reason: "Proof is missing immutable signed payload." };
+  const canonicalPayload = proof.canonicalPayload;
+  if (!canonicalPayload) {
+    return { valid: false, reason: "Proof is missing immutable canonical payload." };
   }
 
   if (
-    proof.signedPayload.proofId !== proofId ||
-    proof.signedPayload.propertyId !== proof.propertyId ||
-    proof.signedPayload.issuer !== proof.issuerPublicKey
+    canonicalPayload.proofId !== proofId ||
+    canonicalPayload.propertyId !== proof.propertyId ||
+    canonicalPayload.issuer !== proof.issuerPublicKey
   ) {
-    return { valid: false, reason: "Signed payload does not match proof identity fields." };
+    return { valid: false, reason: "Canonical payload does not match proof identity fields." };
   }
 
-  if (proof.signature?.scheme !== "ed25519") {
+  if (issuerSignature?.scheme !== "ed25519") {
     return { valid: false, reason: "Proof signature scheme is not Ed25519." };
   }
 
@@ -181,7 +209,7 @@ export const validateProofIntegrity = (proof: Proof) => {
     return { valid: false, reason: "Proof is missing reusable passport compatibility fields." };
   }
 
-  if (proof.signature.message !== proofMessage(proof)) {
+  if (issuerSignature.message !== proofMessage(proof)) {
     return { valid: false, reason: "Signed message does not match current proof payload." };
   }
 
@@ -192,7 +220,7 @@ export const validateProofIntegrity = (proof: Proof) => {
   try {
     new PublicKey(proof.tenantWallet);
     if (proof.issuerPublicKey) bs58.decode(proof.issuerPublicKey);
-    bs58.decode(proof.signature.value);
+    bs58.decode(issuerSignature.value);
   } catch {
     return { valid: false, reason: "Proof contains an invalid wallet or signature encoding." };
   }
@@ -201,11 +229,12 @@ export const validateProofIntegrity = (proof: Proof) => {
 };
 
 export const verifyProofSignature = (proof: Proof) => {
-  if (!proof.signature) return false;
+  const issuerSignature = getIssuerSignature(proof);
+  if (!issuerSignature) return false;
 
   try {
-    const publicKey = new PublicKey(proof.signature.signer);
-    const signature = bs58.decode(proof.signature.value);
+    const publicKey = new PublicKey(issuerSignature.signer);
+    const signature = bs58.decode(issuerSignature.value);
     return nacl.sign.detached.verify(encoder.encode(proofMessage(proof)), signature, publicKey.toBytes());
   } catch {
     return false;
@@ -230,6 +259,8 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
   const expired = Date.parse(proof.expiresAt) <= now.getTime();
   const attestationExpired = proof.attestation ? Date.parse(proof.attestation.expiresAt) <= now.getTime() : true;
   const currentProofHash = proofHash(proof);
+  const canonicalPayload = proof.canonicalPayload ?? proof.signedPayload ?? createCanonicalProofPayload(proof);
+  const issuerSignature = getIssuerSignature(proof);
   const proofHashValid =
     Boolean(proof.attestation) &&
     proof.attestation?.proofHash === currentProofHash &&
@@ -247,8 +278,26 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
     `signed payload: ${canonicalProofPayload(proof)}`,
     proof.proofHash && proof.proofHash !== currentProofHash ? "proof hash mismatch" : undefined,
     proof.attestation?.proofHash && proof.attestation.proofHash !== currentProofHash ? "attestation proof hash mismatch" : undefined,
-    proof.signature?.message && proof.signature.message !== proofMessage(proof) ? "signed message mismatch" : undefined,
+    issuerSignature?.message && issuerSignature.message !== proofMessage(proof) ? "signed message mismatch" : undefined,
   ].filter((diagnostic): diagnostic is string => Boolean(diagnostic));
+  const mismatchedFields = [
+    proof.id !== proof.proofId ? "proofId" : undefined,
+    !proof.canonicalPayload ? "canonicalPayload" : undefined,
+    canonicalPayload.proofId !== getProofId(proof) ? "canonicalPayload.proofId" : undefined,
+    canonicalPayload.propertyId !== proof.propertyId ? "canonicalPayload.propertyId" : undefined,
+    canonicalPayload.issuer !== proof.issuerPublicKey ? "canonicalPayload.issuer" : undefined,
+    proof.proofHash !== currentProofHash ? "proofHash" : undefined,
+    proof.attestation?.proofHash !== currentProofHash ? "attestation.proofHash" : undefined,
+    issuerSignature?.message !== proofMessage(proof) ? "issuerSignature.message" : undefined,
+  ].filter((field): field is string => Boolean(field));
+  const integrityDiagnostics = {
+    expectedHash: currentProofHash,
+    actualHash: proof.proofHash ?? "missing",
+    mismatchedFields,
+    signedPayloadKeys: Object.keys(canonicalPayload).sort(),
+    receivedPayloadKeys: Object.keys(proof).sort(),
+    signedPayload: canonicalProofPayload(proof),
+  };
 
   if (!integrity.valid) {
     return {
@@ -264,6 +313,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       revoked,
       trustedIssuerValid: trustedIssuer.valid,
       diagnostics,
+      integrityDiagnostics,
     };
   }
 
@@ -281,6 +331,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       revoked,
       trustedIssuerValid: false,
       diagnostics,
+      integrityDiagnostics,
     };
   }
 
@@ -299,6 +350,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       revoked,
       trustedIssuerValid: true,
       diagnostics,
+      integrityDiagnostics,
     };
   }
 
@@ -316,6 +368,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       revoked,
       trustedIssuerValid: true,
       diagnostics,
+      integrityDiagnostics,
     };
   }
 
@@ -333,6 +386,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       revoked,
       trustedIssuerValid: true,
       diagnostics,
+      integrityDiagnostics,
     };
   }
 
@@ -350,6 +404,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       revoked,
       trustedIssuerValid: true,
       diagnostics,
+      integrityDiagnostics,
     };
   }
 
@@ -367,6 +422,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       revoked,
       trustedIssuerValid: true,
       diagnostics,
+      integrityDiagnostics,
     };
   }
 
@@ -383,5 +439,6 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
     revoked,
     trustedIssuerValid: true,
     diagnostics,
+    integrityDiagnostics,
   };
 };

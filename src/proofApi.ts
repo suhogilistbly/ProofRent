@@ -50,6 +50,14 @@ export type ProofVerificationResult = {
   valid: boolean;
   reason: string;
   diagnostics: string[];
+  integrityDiagnostics: {
+    expectedHash: string;
+    actualHash: string;
+    mismatchedFields: string[];
+    signedPayloadKeys: string[];
+    receivedPayloadKeys: string[];
+    signedPayload: string;
+  };
   expired: boolean;
   signatureValid: boolean;
   integrityValid: boolean;

@@ -168,6 +168,20 @@ test("valid trusted proof passes", async () => {
   const { proof } = await issueProof(request);
   const verification = verifyProof(proof);
 
+  assert.ok(proof.canonicalPayload);
+  assert.ok(proof.issuerSignature);
+  assert.deepEqual(Object.keys(proof.canonicalPayload!).sort(), [
+    "checks",
+    "createdAt",
+    "executionMode",
+    "issuer",
+    "proofId",
+    "propertyId",
+    "riskLevel",
+    "score",
+    "status",
+    "validUntil",
+  ]);
   assert.equal(verification.valid, true);
   assert.equal(verification.trustedIssuerValid, true);
 });
@@ -176,13 +190,14 @@ test("valid signature from wrong issuer fails", async () => {
   const request = validateIssueRequest(createSignedRequest());
   const { proof } = await issueProof(request);
   const wrongIssuer = Keypair.generate();
-  const signature = nacl.sign.detached(encoder.encode(proof.signature!.message), wrongIssuer.secretKey);
+  const signature = nacl.sign.detached(encoder.encode(proof.issuerSignature!.message), wrongIssuer.secretKey);
 
-  proof.signature = {
-    ...proof.signature!,
+  proof.issuerSignature = {
+    ...proof.issuerSignature!,
     signer: wrongIssuer.publicKey.toBase58(),
     value: bs58.encode(signature),
   };
+  proof.signature = proof.issuerSignature;
 
   const verification = verifyProof(proof);
   assert.equal(verification.valid, false);
@@ -204,7 +219,7 @@ test("tampered proof body fails", async () => {
   const request = validateIssueRequest(createSignedRequest());
   const { proof } = await issueProof(request);
 
-  proof.signedPayload!.riskLevel = "high";
+  proof.canonicalPayload!.riskLevel = "high";
 
   const verification = verifyProof(proof);
   assert.equal(verification.valid, false);

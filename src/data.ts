@@ -103,12 +103,15 @@ const normalizeProof = (proof: Proof): Proof => {
     compatibleRentRange,
     riskCategory: proof.riskCategory ?? proof.riskLevel,
     attestationStatus: proof.attestationStatus === "failed" ? ("failed" as const) : ("attested" as const),
-    signedPayload: proof.signedPayload ?? createCanonicalProofPayload(proof),
+    canonicalPayload: proof.canonicalPayload ?? proof.signedPayload ?? createCanonicalProofPayload(proof),
+    signedPayload: proof.signedPayload ?? proof.canonicalPayload ?? createCanonicalProofPayload(proof),
   };
 
   return {
     ...proof,
-    signedPayload: proof.signedPayload ?? createCanonicalProofPayload(normalizedForHash),
+    canonicalPayload: proof.canonicalPayload ?? proof.signedPayload ?? createCanonicalProofPayload(normalizedForHash),
+    signedPayload: proof.signedPayload ?? proof.canonicalPayload ?? createCanonicalProofPayload(normalizedForHash),
+    issuerSignature: proof.issuerSignature ?? proof.signature,
     propertyIds: proof.propertyIds ?? [proof.propertyId],
     compatibleRentRange,
     riskCategory: proof.riskCategory ?? proof.riskLevel,
