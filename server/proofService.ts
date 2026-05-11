@@ -99,6 +99,14 @@ type ProofCommitmentRecord = {
 
 type CanonicalProofPayload = NonNullable<Proof["canonicalPayload"]>;
 
+export type IssuedProofPackageValidation = {
+  valid: boolean;
+  missingFields: string[];
+  failedStage: "canonical-payload" | "proof-signing" | "attestation" | "issue-output" | null;
+  signingCompleted: boolean;
+  attestationCompleted: boolean;
+};
+
 export type AuditEvent = {
   id: string;
   action: AuditAction;
@@ -410,6 +418,93 @@ const signAttestation = (attestation: Omit<NonNullable<Proof["attestation"]>, "s
     value: bs58.encode(signature),
     message,
   };
+};
+
+const hasString = (value: unknown) => typeof value === "string" && value.length > 0;
+
+export const validateIssuedProofPackage = (proof: Proof): IssuedProofPackageValidation => {
+  const issuerSignature = getIssuerSignature(proof);
+  const attestationSignature = getAttestationSignature(proof);
+  const requiredFields: Array<[string, unknown]> = [
+    ["proofId", proof.proofId || proof.id],
+    ["canonicalPayload", proof.canonicalPayload],
+    ["canonicalPayload.proofId", proof.canonicalPayload?.proofId],
+    ["canonicalPayload.propertyId", proof.canonicalPayload?.propertyId],
+    ["canonicalPayload.status", proof.canonicalPayload?.status],
+    ["canonicalPayload.riskLevel", proof.canonicalPayload?.riskLevel],
+    ["canonicalPayload.score", proof.canonicalPayload?.score],
+    ["canonicalPayload.validUntil", proof.canonicalPayload?.validUntil],
+    ["canonicalPayload.createdAt", proof.canonicalPayload?.createdAt],
+    ["canonicalPayload.checks", proof.canonicalPayload?.checks],
+    ["canonicalPayload.issuer", proof.canonicalPayload?.issuer],
+    ["canonicalPayload.executionMode", proof.canonicalPayload?.executionMode],
+    ["proofHash", proof.proofHash],
+    ["issuer", proof.issuerPublicKey],
+    ["issuerSignature", issuerSignature],
+    ["issuerSignature.scheme", issuerSignature?.scheme],
+    ["issuerSignature.signer", issuerSignature?.signer],
+    ["issuerSignature.value", issuerSignature?.value],
+    ["issuerSignature.message", issuerSignature?.message],
+    ["attestation", proof.attestation],
+    ["attestation.attestationId", proof.attestation?.attestationId],
+    ["attestation.proofHash", proof.attestation?.proofHash],
+    ["attestation.issuer", proof.attestation?.issuer],
+    ["attestation.issuerPublicKey", proof.attestation?.issuerPublicKey],
+    ["attestation.issuedAt", proof.attestation?.issuedAt],
+    ["attestation.expiresAt", proof.attestation?.expiresAt],
+    ["attestation.executionEnvironment", proof.attestation?.executionEnvironment],
+    ["attestation.attestationHash", proof.attestation?.attestationHash],
+    ["attestationSignature", attestationSignature],
+    ["attestationSignature.scheme", attestationSignature?.scheme],
+    ["attestationSignature.signer", attestationSignature?.signer],
+    ["attestationSignature.value", attestationSignature?.value],
+    ["attestationSignature.message", attestationSignature?.message],
+    ["createdAt", proof.createdAt],
+    ["validUntil", proof.validUntil],
+    ["checks", proof.checks],
+    ["riskLevel", proof.riskLevel],
+    ["status", proof.status],
+  ];
+  const missingFields = requiredFields
+    .filter(([, value]) => value === undefined || value === null || (typeof value === "string" && value.length === 0))
+    .map(([field]) => field);
+  const signingCompleted =
+    issuerSignature?.scheme === "ed25519" &&
+    hasString(issuerSignature.signer) &&
+    hasString(issuerSignature.value) &&
+    hasString(issuerSignature.message);
+  const attestationCompleted =
+    Boolean(proof.attestation) &&
+    hasString(proof.attestation?.attestationHash) &&
+    attestationSignature?.scheme === "ed25519" &&
+    hasString(attestationSignature.signer) &&
+    hasString(attestationSignature.value) &&
+    hasString(attestationSignature.message);
+  const failedStage = missingFields.some((field) => field.startsWith("canonicalPayload"))
+    ? "canonical-payload"
+    : !signingCompleted
+      ? "proof-signing"
+      : !attestationCompleted
+        ? "attestation"
+        : missingFields.length
+          ? "issue-output"
+          : null;
+
+  return { valid: missingFields.length === 0, missingFields, failedStage, signingCompleted, attestationCompleted };
+};
+
+const assertIssuedProofPackage = (proof: Proof) => {
+  const validation = validateIssuedProofPackage(proof);
+  if (!validation.valid) {
+    throw new Error(
+      [
+        `Proof issuance incomplete at ${validation.failedStage ?? "issue-output"}.`,
+        `Missing fields: ${validation.missingFields.join(", ")}.`,
+        `Signing completed: ${validation.signingCompleted ? "yes" : "no"}.`,
+        `Attestation completed: ${validation.attestationCompleted ? "yes" : "no"}.`,
+      ].join(" "),
+    );
+  }
 };
 
 const validateNumber = (value: unknown, field: string, errors: string[]) => {
@@ -749,6 +844,7 @@ export const issueProof = async (request: ProofIssueRequest) => {
     signature: signAttestation(unsignedAttestationWithHash),
     attestationSignature: signAttestation(unsignedAttestationWithHash),
   };
+  assertIssuedProofPackage(proof);
   const verification = verifyProof(proof);
   issuedProofs.set(proofId, proof);
   persistProofStore();

@@ -64,7 +64,7 @@ import {
   createProtectedTenantPayload,
   signProofRequest,
 } from "./proof/proofExecution";
-import { verifyProofAuthenticity } from "./proofCrypto";
+import { validateIssuedProofPackage, verifyProofAuthenticity } from "./proofCrypto";
 import {
   getMagicBlockBackendStatus,
   getPublicProof,
@@ -776,6 +776,22 @@ const decodeProofPayload = (value?: string | null): Proof | undefined => {
 
 const publicProofUrl = (proof: Proof) =>
   `${window.location.origin}/verify-proof/${proof.proofId || proof.id}?proof=${encodeProofPayload(proof)}`;
+
+const issuedProofValidationMessage = (proof: Proof, stage: string) => {
+  const validation = validateIssuedProofPackage(proof);
+  if (validation.valid) return null;
+  return [
+    `Proof issuance incomplete at ${stage}${validation.failedStage ? ` (${validation.failedStage})` : ""}.`,
+    `Missing fields: ${validation.missingFields.join(", ")}.`,
+    `Signing completed: ${validation.signingCompleted ? "yes" : "no"}.`,
+    `Attestation completed: ${validation.attestationCompleted ? "yes" : "no"}.`,
+  ].join(" ");
+};
+
+const assertIssuedProofReady = (proof: Proof, stage: string) => {
+  const message = issuedProofValidationMessage(proof, stage);
+  if (message) throw new Error(message);
+};
 
 const queueLandlordApplication = (propertyId: string, proofId: string) => {
   const existingApplication = getApplications().find(
