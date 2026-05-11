@@ -140,13 +140,11 @@ const canAcceptForLandlord = (proof?: Proof | null, verification?: BackendProofV
 const verificationDiagnosticsText = (verification?: BackendProofVerificationResult | null) => {
   if (!verification) return "Verification unavailable";
   const details = verification.integrityDiagnostics;
+  if (verification.valid) return verification.diagnostics.includes("proof missing") ? "Verified from signed proof payload" : "Proof found and verified";
   return [
-    ...verification.diagnostics,
-    `expectedHash=${details.expectedHash}`,
-    `actualHash=${details.actualHash}`,
-    details.mismatchedFields.length ? `mismatchedFields=${details.mismatchedFields.join("|")}` : undefined,
-    `signedPayloadKeys=${details.signedPayloadKeys.join("|")}`,
-    `receivedPayloadKeys=${details.receivedPayloadKeys.join("|")}`,
+    verification.reason,
+    details.expectedHash !== details.actualHash ? `hash ${details.actualHash} != ${details.expectedHash}` : undefined,
+    details.mismatchedFields.length ? `mismatched: ${details.mismatchedFields.join(", ")}` : undefined,
   ].filter(Boolean).join(", ");
 };
 

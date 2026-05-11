@@ -343,6 +343,15 @@ const attestationMessage = (attestation: NonNullable<Proof["attestation"]>) =>
   `ProofRent simulated confidential execution attestation\n${attestationPayload(attestation)}`;
 
 const attestationHash = (attestation: NonNullable<Proof["attestation"]>) => hashText(attestationMessage(attestation));
+const parseAttestationMessagePayload = (message?: string) => {
+  const prefix = "ProofRent simulated confidential execution attestation\n";
+  if (!message?.startsWith(prefix)) return undefined;
+  try {
+    return JSON.parse(message.slice(prefix.length)) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+};
 
 const getProofIssuer = (proof: Proof) => proof.issuerPublicKey ?? proof.signature?.signer;
 const getIssuerSignature = (proof: Proof) => proof.issuerSignature ?? proof.signature;
@@ -820,6 +829,18 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
   const actualAttestationProofHash = proof.attestation?.proofHash ?? "";
   const signedPayload = proofPayload(proof);
   const attestationSignature = getAttestationSignature(proof);
+  const expectedAttestationMessage = proof.attestation ? attestationMessage(proof.attestation) : "";
+  const signedAttestationPayload = parseAttestationMessagePayload(attestationSignature?.message);
+  const signedAttestationPayloadMatches =
+    Boolean(signedAttestationPayload) &&
+    signedAttestationPayload?.proofHash === expectedProofHash &&
+    signedAttestationPayload?.issuer === trustedProofIssuerPublicKey &&
+    ((signedAttestationPayload?.issuerPublicKey ?? trustedProofIssuerPublicKey) === trustedProofIssuerPublicKey);
+  const attestationMessageMatches =
+    attestationSignature?.message === expectedAttestationMessage || signedAttestationPayloadMatches;
+  const attestationHashMatches =
+    proof.attestation?.attestationHash === (proof.attestation ? attestationHash(proof.attestation) : "") ||
+    (Boolean(attestationSignature?.message) && proof.attestation?.attestationHash === hashText(attestationSignature?.message ?? ""));
   const mismatchedFields = [
     proof.id !== proof.proofId ? "proofId" : undefined,
     !proof.canonicalPayload ? "canonicalPayload" : undefined,
@@ -829,8 +850,8 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
     proof.proofHash !== expectedProofHash ? "proofHash" : undefined,
     proof.attestation?.proofHash !== expectedProofHash ? "attestation.proofHash" : undefined,
     issuerSignature?.message !== proofMessage(proof) ? "issuerSignature.message" : undefined,
-    proof.attestation?.attestationHash !== (proof.attestation ? attestationHash(proof.attestation) : "") ? "attestation.attestationHash" : undefined,
-    attestationSignature?.message !== (proof.attestation ? attestationMessage(proof.attestation) : "") ? "attestationSignature.message" : undefined,
+    !attestationHashMatches ? "attestation.attestationHash" : undefined,
+    !attestationMessageMatches ? "attestationSignature.message" : undefined,
   ].filter((field): field is string => Boolean(field));
   const signedPayloadKeys = Object.keys(canonicalPayload).sort();
   const receivedPayloadKeys = Object.keys(proof).sort();
@@ -855,8 +876,8 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
     Boolean(proof.attestation?.attestationId) &&
     proof.attestation?.issuerPublicKey === trustedProofIssuerPublicKey &&
     proof.attestation?.issuer === trustedProofIssuerPublicKey &&
-    proof.attestation?.attestationHash === (proof.attestation ? attestationHash(proof.attestation) : "") &&
-    attestationSignature?.message === (proof.attestation ? attestationMessage(proof.attestation) : "") &&
+    attestationHashMatches &&
+    attestationMessageMatches &&
     typeof proof.compatibleRentRange?.max === "number" &&
     Array.isArray(proof.propertyIds) &&
     !Number.isNaN(Date.parse(proof.issuedAt)) &&
@@ -880,9 +901,8 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
   if (proof.attestation && attestationSignature?.scheme === "ed25519") {
     try {
       attestationSignatureValid =
-        attestationSignature.message === attestationMessage(proof.attestation) &&
         nacl.sign.detached.verify(
-          encoder.encode(attestationMessage(proof.attestation)),
+          encoder.encode(attestationSignature.message),
           bs58.decode(attestationSignature.value),
           bs58.decode(attestationSignature.signer),
         );

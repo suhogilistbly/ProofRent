@@ -54,13 +54,11 @@ export function BackendVerificationBadge({
 const verificationDiagnosticsText = (verification?: ProofVerificationResult) => {
   if (!verification) return "Verification unavailable";
   const details = verification.integrityDiagnostics;
+  if (verification.valid) return verification.diagnostics.includes("proof missing") ? "Verified from signed proof payload" : "Proof found and verified";
   return [
-    ...verification.diagnostics,
-    details ? `expectedHash=${details.expectedHash}` : undefined,
-    details ? `actualHash=${details.actualHash}` : undefined,
-    details?.mismatchedFields.length ? `mismatchedFields=${details.mismatchedFields.join("|")}` : undefined,
-    details ? `signedPayloadKeys=${details.signedPayloadKeys.join("|")}` : undefined,
-    details ? `receivedPayloadKeys=${details.receivedPayloadKeys.join("|")}` : undefined,
+    verification.reason,
+    details && details.expectedHash !== details.actualHash ? `hash ${details.actualHash} != ${details.expectedHash}` : undefined,
+    details?.mismatchedFields.length ? `mismatched: ${details.mismatchedFields.join(", ")}` : undefined,
   ].filter(Boolean).join(", ");
 };
 
