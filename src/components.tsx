@@ -455,6 +455,7 @@ export function LandlordDashboard({
                     : <Badge tone="rose">{unavailableReason ?? backendVerification?.reason ?? "Backend rejected"}</Badge>
               }
             />
+            <Metric label="Diagnostics" value={backendVerification?.diagnostics?.join(", ") ?? unavailableReason ?? "Verification unavailable"} />
             <Metric
               label="Execution mode"
               value={isSimulationOnlyProof(proof) ? <Badge tone="amber">Simulation only</Badge> : <Badge tone="green">Backend issued</Badge>}

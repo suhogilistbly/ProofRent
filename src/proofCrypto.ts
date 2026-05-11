@@ -11,6 +11,7 @@ type SignMessage = (message: Uint8Array) => Promise<Uint8Array>;
 export type ProofVerificationResult = {
   valid: boolean;
   reason: string;
+  diagnostics?: string[];
   expired: boolean;
   signatureValid: boolean;
   integrityValid: boolean;
@@ -29,21 +30,27 @@ const ordered = <T extends Record<string, unknown>>(value: T): T =>
 
 export const getProofId = (proof: Pick<Proof, "id" | "proofId">) => proof.proofId || proof.id;
 
+const proofExecutionMode = (proof: Proof) =>
+  proof.executionMetadata?.executionMode ??
+  proof.executionMetadata?.provider ??
+  proof.executionProvider ??
+  "local-simulation";
+
+export const createCanonicalProofPayload = (proof: Proof): NonNullable<Proof["signedPayload"]> => ({
+  proofId: getProofId(proof),
+  propertyId: proof.propertyId,
+  status: proof.status,
+  riskLevel: proof.riskLevel,
+  score: proof.score,
+  validUntil: proof.validUntil || proof.expiresAt,
+  createdAt: proof.createdAt || proof.issuedAt,
+  checks: ordered(proof.checks),
+  issuer: proof.issuerPublicKey ?? proof.signature?.signer ?? "",
+  executionMode: proofExecutionMode(proof),
+});
+
 export const canonicalProofPayload = (proof: Proof) =>
-  JSON.stringify(
-    ordered({
-      attestationStatus: proof.attestationStatus,
-      checks: ordered(proof.checks),
-      compatibleRentRange: ordered(proof.compatibleRentRange),
-      expiresAt: proof.expiresAt,
-      issuedAt: proof.issuedAt,
-      proofId: getProofId(proof),
-      propertyIds: proof.propertyIds,
-      riskCategory: proof.riskCategory,
-      tenantWallet: proof.tenantWallet,
-      issuerPublicKey: proof.issuerPublicKey,
-    }),
-  );
+  JSON.stringify(ordered(proof.signedPayload ?? createCanonicalProofPayload(proof)));
 
 export const proofMessage = (proof: Proof) =>
   `ProofRent signed rental proof\n${canonicalProofPayload(proof)}`;
@@ -141,6 +148,18 @@ export const validateProofIntegrity = (proof: Proof) => {
     return { valid: false, reason: "Proof ID alias does not match canonical proofId." };
   }
 
+  if (!proof.signedPayload) {
+    return { valid: false, reason: "Proof is missing immutable signed payload." };
+  }
+
+  if (
+    proof.signedPayload.proofId !== proofId ||
+    proof.signedPayload.propertyId !== proof.propertyId ||
+    proof.signedPayload.issuer !== proof.issuerPublicKey
+  ) {
+    return { valid: false, reason: "Signed payload does not match proof identity fields." };
+  }
+
   if (proof.signature?.scheme !== "ed25519") {
     return { valid: false, reason: "Proof signature scheme is not Ed25519." };
   }
@@ -219,6 +238,17 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
   const attestationHashValid = proof.attestation ? proof.attestation.attestationHash === attestationHash(proof.attestation) : false;
   const trustedIssuer = verifyTrustedIssuer(proof);
   const revoked = proof.validity === "revoked" || Boolean(proof.revokedAt);
+  const diagnostics = [
+    `expected hash: ${currentProofHash}`,
+    `actual hash: ${proof.proofHash ?? "missing"}`,
+    proof.attestation?.proofHash && proof.attestation.proofHash !== currentProofHash
+      ? `attestation proof hash: ${proof.attestation.proofHash}`
+      : undefined,
+    `signed payload: ${canonicalProofPayload(proof)}`,
+    proof.proofHash && proof.proofHash !== currentProofHash ? "proof hash mismatch" : undefined,
+    proof.attestation?.proofHash && proof.attestation.proofHash !== currentProofHash ? "attestation proof hash mismatch" : undefined,
+    proof.signature?.message && proof.signature.message !== proofMessage(proof) ? "signed message mismatch" : undefined,
+  ].filter((diagnostic): diagnostic is string => Boolean(diagnostic));
 
   if (!integrity.valid) {
     return {
@@ -233,6 +263,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       verificationStatus: "tampered",
       revoked,
       trustedIssuerValid: trustedIssuer.valid,
+      diagnostics,
     };
   }
 
@@ -249,6 +280,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       verificationStatus: "invalid_signature",
       revoked,
       trustedIssuerValid: false,
+      diagnostics,
     };
   }
 
@@ -266,6 +298,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       verificationStatus: "invalid_signature",
       revoked,
       trustedIssuerValid: true,
+      diagnostics,
     };
   }
 
@@ -282,6 +315,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       verificationStatus: "invalid_signature",
       revoked,
       trustedIssuerValid: true,
+      diagnostics,
     };
   }
 
@@ -298,6 +332,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       verificationStatus: "tampered",
       revoked,
       trustedIssuerValid: true,
+      diagnostics,
     };
   }
 
@@ -314,6 +349,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       verificationStatus: "expired",
       revoked,
       trustedIssuerValid: true,
+      diagnostics,
     };
   }
 
@@ -330,6 +366,7 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
       verificationStatus: "invalid_state",
       revoked,
       trustedIssuerValid: true,
+      diagnostics,
     };
   }
 
@@ -345,5 +382,6 @@ export const verifyProofAuthenticity = (proof: Proof, now = new Date()): ProofVe
     verificationStatus: "verified",
     revoked,
     trustedIssuerValid: true,
+    diagnostics,
   };
 };

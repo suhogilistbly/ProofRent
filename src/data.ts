@@ -1,5 +1,5 @@
 import type { Application, Proof, Property } from "./types";
-import { proofHash } from "./proofCrypto";
+import { createCanonicalProofPayload, proofHash } from "./proofCrypto";
 
 const PROPERTY_KEY = "proofrent.properties";
 const PROOF_KEY = "proofrent.proofs";
@@ -103,10 +103,12 @@ const normalizeProof = (proof: Proof): Proof => {
     compatibleRentRange,
     riskCategory: proof.riskCategory ?? proof.riskLevel,
     attestationStatus: proof.attestationStatus === "failed" ? ("failed" as const) : ("attested" as const),
+    signedPayload: proof.signedPayload ?? createCanonicalProofPayload(proof),
   };
 
   return {
     ...proof,
+    signedPayload: proof.signedPayload ?? createCanonicalProofPayload(normalizedForHash),
     propertyIds: proof.propertyIds ?? [proof.propertyId],
     compatibleRentRange,
     riskCategory: proof.riskCategory ?? proof.riskLevel,

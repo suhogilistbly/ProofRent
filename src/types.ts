@@ -44,6 +44,23 @@ export type Property = {
 export type Proof = {
   id: string;
   proofId: string;
+  signedPayload?: {
+    proofId: string;
+    propertyId: string;
+    status: "Tenant Verified" | "Not Verified";
+    riskLevel: "low" | "medium" | "high";
+    score: number;
+    validUntil: string;
+    createdAt: string;
+    checks: {
+      incomeCheck: CheckStatus;
+      cashflowCheck: CheckStatus;
+      savingsCheck: CheckStatus;
+      debtCheck: CheckStatus;
+    };
+    issuer: string;
+    executionMode: string;
+  };
   tenantWallet: string;
   propertyId: string;
   propertyIds: string[];

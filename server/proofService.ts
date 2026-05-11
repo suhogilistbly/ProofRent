@@ -1,4 +1,6 @@
 import { randomBytes, createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import bs58 from "bs58";
 import nacl from "tweetnacl";
 import type { Proof } from "../src/types.js";
@@ -43,6 +45,7 @@ export type ProofIssueRequest = {
 export type ProofVerificationResult = {
   valid: boolean;
   reason: string;
+  diagnostics: string[];
   expired: boolean;
   signatureValid: boolean;
   integrityValid: boolean;
@@ -86,6 +89,8 @@ type ProofCommitmentRecord = {
   commitment?: ProofCommitment;
 };
 
+type CanonicalProofPayload = NonNullable<Proof["signedPayload"]>;
+
 export type AuditEvent = {
   id: string;
   action: AuditAction;
@@ -105,9 +110,29 @@ const REQUEST_TTL_MS = 5 * 60 * 1000;
 const REQUEST_FUTURE_SKEW_MS = 60 * 1000;
 const MAX_AUDIT_EVENTS = 200;
 const verifierProgram = "ProofRentVerifier111111111111111111111111111111";
+const fallbackServerlessSigningSeed = "proofrent-mvp-serverless-compatible-signing-seed-v1";
+const localStoreDir = join(process.cwd(), ".proofrent-data");
+const localSigningSeedPath = join(localStoreDir, "signing-seed.txt");
+const localProofStorePath = join(localStoreDir, "proofs.json");
+const localRevocationStorePath = join(localStoreDir, "revocations.json");
+const localPersistenceEnabled = !process.env.VERCEL;
+
+const getLocalSigningSeed = () => {
+  if (!localPersistenceEnabled) return randomBytes(32);
+  mkdirSync(localStoreDir, { recursive: true });
+  if (existsSync(localSigningSeedPath)) {
+    return Buffer.from(readFileSync(localSigningSeedPath, "utf8").trim(), "hex");
+  }
+  const seed = randomBytes(32);
+  writeFileSync(localSigningSeedPath, seed.toString("hex"));
+  return seed;
+};
+
 const serviceSigningSeed = process.env.PROOFRENT_SIGNING_SEED
   ? createHash("sha256").update(process.env.PROOFRENT_SIGNING_SEED).digest()
-  : randomBytes(32);
+  : process.env.VERCEL
+    ? createHash("sha256").update(fallbackServerlessSigningSeed).digest()
+    : getLocalSigningSeed();
 const serviceKeypair = nacl.sign.keyPair.fromSeed(serviceSigningSeed);
 const servicePublicKey = bs58.encode(serviceKeypair.publicKey);
 const trustedProofIssuerPublicKey = process.env.SERVER_PROOF_ISSUER_PUBLIC_KEY?.trim() || servicePublicKey;
@@ -117,10 +142,44 @@ const revokedProofs = new Map<string, string>();
 const issuedProofs = new Map<string, Proof>();
 const auditLog: AuditEvent[] = [];
 
+const readJsonStore = <T,>(path: string, fallback: T): T => {
+  if (!localPersistenceEnabled || !existsSync(path)) return fallback;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as T;
+  } catch {
+    return fallback;
+  }
+};
+
+const writeJsonStore = <T,>(path: string, value: T) => {
+  if (!localPersistenceEnabled) return;
+  mkdirSync(localStoreDir, { recursive: true });
+  writeFileSync(path, JSON.stringify(value, null, 2));
+};
+
+const persistProofStore = () => {
+  writeJsonStore(localProofStorePath, Array.from(issuedProofs.values()));
+};
+
+const persistRevocationStore = () => {
+  writeJsonStore(localRevocationStorePath, Array.from(revokedProofs.entries()));
+};
+
+const loadPersistentStores = () => {
+  for (const proof of readJsonStore<Proof[]>(localProofStorePath, [])) {
+    issuedProofs.set(proof.proofId || proof.id, proof);
+  }
+  for (const [proofId, reason] of readJsonStore<Array<[string, string]>>(localRevocationStorePath, [])) {
+    revokedProofs.set(proofId, reason);
+  }
+};
+
 const ordered = <T extends Record<string, unknown>>(value: T): T =>
   Object.keys(value)
     .sort()
     .reduce((result, key) => ({ ...result, [key]: value[key] }), {} as T);
+
+loadPersistentStores();
 
 const randomHex = (length: number) => randomBytes(Math.ceil(length / 2)).toString("hex").slice(0, length);
 
@@ -213,21 +272,29 @@ const requestMessage = (request: ProofIssueRequest) =>
     `nonce: ${request.nonce}`,
   ].join("\n");
 
-const proofPayload = (proof: Proof) =>
-  JSON.stringify(
-    ordered({
-      attestationStatus: proof.attestationStatus,
-      checks: ordered(proof.checks),
-      compatibleRentRange: ordered(proof.compatibleRentRange),
-      expiresAt: proof.expiresAt,
-      issuedAt: proof.issuedAt,
-      proofId: proof.proofId || proof.id,
-      propertyIds: proof.propertyIds,
-      riskCategory: proof.riskCategory,
-      tenantWallet: proof.tenantWallet,
-      issuerPublicKey: proof.issuerPublicKey,
-    }),
-  );
+const proofExecutionMode = (proof: Proof) =>
+  proof.executionMetadata?.executionMode ??
+  proof.executionMetadata?.provider ??
+  proof.executionProvider ??
+  "local-simulation";
+
+const createCanonicalProofPayload = (proof: Proof): CanonicalProofPayload => ({
+  proofId: proof.proofId || proof.id,
+  propertyId: proof.propertyId,
+  status: proof.status,
+  riskLevel: proof.riskLevel,
+  score: proof.score,
+  validUntil: proof.validUntil || proof.expiresAt,
+  createdAt: proof.createdAt || proof.issuedAt,
+  checks: ordered(proof.checks),
+  issuer: proof.issuerPublicKey ?? proof.signature?.signer ?? servicePublicKey,
+  executionMode: proofExecutionMode(proof),
+});
+
+const proofPayloadObject = (proof: Proof): CanonicalProofPayload =>
+  proof.signedPayload ?? createCanonicalProofPayload(proof);
+
+const proofPayload = (proof: Proof) => JSON.stringify(ordered(proofPayloadObject(proof)));
 
 const proofMessage = (proof: Proof) => `ProofRent signed rental proof\n${proofPayload(proof)}`;
 
@@ -611,6 +678,7 @@ export const issueProof = async (request: ProofIssueRequest) => {
     createdAt: issuedAt.toISOString(),
   };
 
+  proof.signedPayload = createCanonicalProofPayload(proof);
   proof.proofHash = proofHash(proof);
   proof.signature = signProof(proof);
   const unsignedAttestation = {
@@ -646,6 +714,7 @@ export const issueProof = async (request: ProofIssueRequest) => {
   };
   const verification = verifyProof(proof);
   issuedProofs.set(proofId, proof);
+  persistProofStore();
 
   audit({
     action: "proof.issue",
@@ -703,23 +772,31 @@ export const issueProofWithSettlement = async (request: ProofIssueRequest) => {
     const commitment = await settleCommitment(commitmentPayload);
     attachOnChainCommitment(result.proof, commitment);
     issuedProofs.set(result.proof.proofId || result.proof.id, result.proof);
+    persistProofStore();
   }
   result.verification = verifyProof(result.proof);
   return result;
 };
 
 export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationResult => {
+  const proofId = proof.proofId || proof.id;
   const expired = Date.parse(proof.expiresAt) <= now.getTime();
   const attestationExpired = proof.attestation ? Date.parse(proof.attestation.expiresAt) <= now.getTime() : true;
-  const revoked = revokedProofs.has(proof.proofId || proof.id) || proof.validity === "revoked" || Boolean(proof.revokedAt);
+  const storedProof = issuedProofs.get(proofId);
+  const revoked = revokedProofs.has(proofId) || proof.validity === "revoked" || Boolean(proof.revokedAt);
   const trustedIssuer = verifyTrustedIssuer(proof);
   const expectedProofHash = proofHash(proof);
+  const actualProofHash = proof.proofHash ?? "";
+  const actualAttestationProofHash = proof.attestation?.proofHash ?? "";
+  const signedPayload = proofPayload(proof);
   const attestationSignature = getAttestationSignature(proof);
   const integrityValid =
     proof.id === proof.proofId &&
+    proof.signedPayload?.proofId === proofId &&
+    proof.signedPayload?.propertyId === proof.propertyId &&
     proof.signature?.scheme === "ed25519" &&
     proof.signature.message === proofMessage(proof) &&
-    proof.issuerPublicKey === trustedProofIssuerPublicKey &&
+    proof.signedPayload?.issuer === proof.issuerPublicKey &&
     proof.proofHash === expectedProofHash &&
     proof.attestationStatus === "attested" &&
     Boolean(proof.attestation?.attestationId) &&
@@ -734,7 +811,7 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
   const proofHashValid = Boolean(proof.attestation) && proof.attestation?.proofHash === expectedProofHash && proof.proofHash === expectedProofHash;
 
   let signatureValid = false;
-  if (integrityValid && proof.signature) {
+  if (proof.signature?.scheme === "ed25519" && proof.signature.message === proofMessage(proof)) {
     try {
       signatureValid = nacl.sign.detached.verify(
         encoder.encode(proofMessage(proof)),
@@ -785,10 +862,30 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
   if (proof.attestation) proof.attestation.verificationStatus = verificationStatus;
 
   const valid = verificationStatus === "verified";
+  const diagnostics = [
+    storedProof ? "proof found" : "proof missing",
+    `expected hash: ${expectedProofHash}`,
+    `actual hash: ${actualProofHash || "missing"}`,
+    actualAttestationProofHash && actualAttestationProofHash !== expectedProofHash
+      ? `attestation proof hash: ${actualAttestationProofHash}`
+      : undefined,
+    `signed payload: ${signedPayload}`,
+    actualProofHash && actualProofHash !== expectedProofHash ? "proof hash mismatch" : undefined,
+    actualAttestationProofHash && actualAttestationProofHash !== expectedProofHash ? "attestation proof hash mismatch" : undefined,
+    proof.signature?.message && proof.signature.message !== proofMessage(proof) ? "signed message mismatch" : undefined,
+    !trustedIssuer.valid ? "issuer mismatch" : undefined,
+    !signatureValid || !attestationSignatureValid ? "signature invalid" : undefined,
+    expired || attestationExpired ? "expired" : undefined,
+    revoked ? "revoked" : undefined,
+    !proofHashValid || !integrityValid ? "proof integrity failed" : undefined,
+  ].filter((diagnostic): diagnostic is string => Boolean(diagnostic));
+
   return {
     valid,
     reason:
-      verificationStatus === "tampered"
+      !trustedIssuer.valid
+        ? trustedIssuer.reason
+        : verificationStatus === "tampered"
         ? "Proof hash or integrity fields do not match the signed attestation."
         : verificationStatus === "invalid_signature"
           ? trustedIssuer.valid
@@ -803,6 +900,7 @@ export const verifyProof = (proof: Proof, now = new Date()): ProofVerificationRe
                 ? "No on-chain commitment found for this proof."
                 : "Proof is not in an active reusable state."
             : "Proof integrity, expiration, proof hash, and signatures are valid.",
+    diagnostics,
     expired,
     signatureValid,
     integrityValid,
@@ -826,6 +924,8 @@ export const revokeProof = (proofId: string, reason: string) => {
     proof.revokedAt = new Date().toISOString();
     proof.revocationReason = reason || "Revoked by proof owner or verifier.";
   }
+  persistRevocationStore();
+  persistProofStore();
   audit({
     action: "proof.revoke",
     proofId,
@@ -840,6 +940,7 @@ export const revokeProofWithSettlement = async (proofId: string, reason: string)
   if (proof?.proofHash) {
     const commitment = await revokeCommitment(proof.proofHash);
     attachOnChainCommitment(proof, commitment);
+    persistProofStore();
   }
   return proof;
 };
@@ -865,5 +966,7 @@ export const clearProofSecurityStateForTests = () => {
   nonceStore.clear();
   revokedProofs.clear();
   issuedProofs.clear();
+  persistRevocationStore();
+  persistProofStore();
   auditLog.length = 0;
 };

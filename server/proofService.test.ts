@@ -204,9 +204,77 @@ test("tampered proof body fails", async () => {
   const request = validateIssueRequest(createSignedRequest());
   const { proof } = await issueProof(request);
 
-  proof.riskCategory = "high";
+  proof.signedPayload!.riskLevel = "high";
 
   const verification = verifyProof(proof);
   assert.equal(verification.valid, false);
   assert.equal(verification.verificationStatus, "tampered");
+});
+
+test("serialize sign store reload verifies canonical payload", async () => {
+  const request = validateIssueRequest(createSignedRequest());
+  const { proof } = await issueProof(request);
+  const reloaded = JSON.parse(JSON.stringify(proof));
+
+  const verification = verifyProof(reloaded);
+
+  assert.equal(verification.valid, true);
+  assert.equal(verification.proofHashValid, true);
+});
+
+test("localStorage-style roundtrip ignores UI-only metadata changes", async () => {
+  const request = validateIssueRequest(createSignedRequest());
+  const { proof } = await issueProof(request);
+  const reloaded = JSON.parse(JSON.stringify({
+    ...proof,
+    handoffPreview: "landlord-ui-only",
+    onChainCommitment: {
+      configured: false,
+      status: "not_configured",
+      proofHash: proof.proofHash,
+      reason: "Solana settlement not configured",
+    },
+  }));
+
+  const verification = verifyProof(reloaded);
+
+  assert.equal(verification.valid, true);
+  assert.equal(verification.proofHashValid, true);
+});
+
+test("serverless memory reset still verifies submitted proof payload", async () => {
+  const request = validateIssueRequest(createSignedRequest());
+  const { proof } = await issueProof(request);
+  const submittedProof = JSON.parse(JSON.stringify(proof));
+  clearProofSecurityStateForTests();
+
+  const verification = verifyProof(submittedProof);
+
+  assert.equal(verification.valid, true);
+  assert.ok(verification.diagnostics.includes("proof missing"));
+});
+
+test("landlord verification after refresh remains valid", async () => {
+  const request = validateIssueRequest(createSignedRequest());
+  const { proof } = await issueProofWithSettlement(request);
+  const refreshedProof = JSON.parse(JSON.stringify(proof));
+
+  const verification = verifyProof(refreshedProof);
+
+  assert.equal(verification.valid, true);
+  assert.equal(verification.attestationSignatureValid, true);
+});
+
+test("public proof verification after redeploy uses embedded signed payload", async () => {
+  const request = validateIssueRequest(createSignedRequest());
+  const { proof } = await issueProof(request);
+  const embeddedProofPayload = Buffer.from(encodeURIComponent(JSON.stringify(proof))).toString("base64url");
+  clearProofSecurityStateForTests();
+  const publicProof = JSON.parse(decodeURIComponent(Buffer.from(embeddedProofPayload, "base64url").toString("utf8")));
+
+  const verification = verifyProof(publicProof);
+
+  assert.equal(verification.valid, true);
+  assert.equal(verification.signatureValid, true);
+  assert.ok(verification.diagnostics.includes("proof missing"));
 });

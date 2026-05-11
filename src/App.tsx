@@ -746,8 +746,25 @@ const validityLabel = (proof: Proof) => {
   return "Active";
 };
 
+const encodeProofPayload = (proof: Proof) =>
+  btoa(encodeURIComponent(JSON.stringify(proof)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+const decodeProofPayload = (value?: string | null): Proof | undefined => {
+  if (!value) return undefined;
+  try {
+    const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    return JSON.parse(decodeURIComponent(atob(padded))) as Proof;
+  } catch {
+    return undefined;
+  }
+};
+
 const publicProofUrl = (proof: Proof) =>
-  `${window.location.origin}${proof.shareUrlPath ?? `/verify-proof/${proof.id}`}`;
+  `${window.location.origin}/verify-proof/${proof.proofId || proof.id}?proof=${encodeProofPayload(proof)}`;
 
 const queueLandlordApplication = (propertyId: string, proofId: string) => {
   const existingApplication = getApplications().find(
@@ -1787,8 +1804,7 @@ function ProofResultCard({
   };
 
   const copyProofLink = () => {
-    const url = `${window.location.origin}/verify-proof/${proof.id}`;
-    navigator.clipboard?.writeText(url);
+    navigator.clipboard?.writeText(publicProofUrl(proof));
   };
 
   if (!approved) {
@@ -1888,7 +1904,7 @@ function ProofResultCard({
         <Button variant="secondary" onClick={() => navigate("/tenant/passport")}>
           Passport dashboard <ExternalLink className="h-4 w-4" />
         </Button>
-        <Button variant="secondary" onClick={() => navigate(`/verify-proof/${proof.id}`)}>
+        <Button variant="secondary" onClick={() => navigate(`/verify-proof/${proof.id}?proof=${encodeProofPayload(proof)}`)}>
           View as landlord <ExternalLink className="h-4 w-4" />
         </Button>
       </div>
@@ -1980,7 +1996,7 @@ function TenantPassportDashboardPage() {
                       <Button variant="secondary" onClick={() => navigator.clipboard?.writeText(publicProofUrl(proof))}>
                         Copy share URL <Copy className="h-4 w-4" />
                       </Button>
-                      <Button variant="secondary" onClick={() => navigate(`/verify-proof/${proof.id}`)}>
+                      <Button variant="secondary" onClick={() => navigate(`/verify-proof/${proof.id}?proof=${encodeProofPayload(proof)}`)}>
                         Verify <ExternalLink className="h-4 w-4" />
                       </Button>
                       <Button variant="danger" onClick={() => revokePassport(proof)} disabled={revoked}>
@@ -2196,7 +2212,7 @@ function TenantProofPage() {
           <div className="card p-6">
             <h3 className="text-lg font-bold">Share proof</h3>
             <p className="mt-2 text-sm leading-6 text-slate-600">Public verification pages expose only sanitized proof fields.</p>
-            <Link to={`/verify-proof/${proof.id}`} className="mt-5 block">
+            <Link to={`/verify-proof/${proof.id}?proof=${encodeProofPayload(proof)}`} className="mt-5 block">
               <Button className="w-full">
                 Public proof page <ExternalLink className="h-4 w-4" />
               </Button>
@@ -2563,6 +2579,7 @@ function LandlordApplicationPage() {
             <ApplicationDetail label="Risk category" value={<RiskBadge risk={proof.riskCategory} />} />
             <ApplicationDetail label="Validity" value={validityLabel(proof)} />
             <ApplicationDetail label="Backend verification" value={<BackendVerificationBadge verification={proofVerification} unavailable={!proofVerification && !backendVerificationError} />} />
+            <ApplicationDetail label="Diagnostics" value={proofVerification?.diagnostics?.join(", ") ?? "Verification unavailable"} />
             <ApplicationDetail label="Execution mode" value={isSimulationOnlyProof(proof) ? <Badge tone="amber">Simulation only</Badge> : <Badge tone="green">Backend issued</Badge>} />
             <ApplicationDetail label="Attestation" value={proofVerification ? <AttestationStateBadge verification={proofVerification} /> : "Verification unavailable"} />
             <ApplicationDetail label="Proof ID" value={proof.id} />
@@ -2641,7 +2658,7 @@ function LandlordApplicationPage() {
                 {acceptLoading ? "Verifying proof..." : "Accept applicant"} <CheckCircle2 className="h-4 w-4" />
               </Button>
               <Button variant="danger" onClick={onReject} disabled={application.status === "rejected"}>Reject application</Button>
-              <Button variant="secondary" onClick={() => navigate(`/verify-proof/${proof.id}`)}>
+              <Button variant="secondary" onClick={() => navigate(`/verify-proof/${proof.id}?proof=${encodeProofPayload(proof)}`)}>
                 Verify proof page <ExternalLink className="h-4 w-4" />
               </Button>
             </div>
@@ -2664,6 +2681,7 @@ function LandlordApplicationPage() {
 
 function PublicProofPage() {
   const { proofId } = useParams();
+  const [searchParams] = useSearchParams();
   const { properties } = useSeededData();
   const [publicProof, setPublicProof] = useState<Proof | undefined>();
   const [loading, setLoading] = useState(true);
@@ -2672,6 +2690,7 @@ function PublicProofPage() {
 
   useEffect(() => {
     if (!proofId) return;
+    const embeddedProof = decodeProofPayload(searchParams.get("proof"));
     setLoading(true);
     getPublicProof(proofId)
       .then(({ proof, verification }) => {
@@ -2681,22 +2700,32 @@ function PublicProofPage() {
       })
       .catch((error) => {
         const storedProof = findProof(proofId);
-        setPublicProof(storedProof);
-        setBackendVerification(null);
-        setBackendVerificationError(
-          storedProof
-            ? error instanceof Error
-              ? error.message
-              : "Backend verification failed."
-            : error instanceof Error
-              ? error.message
-              : "Backend verification failed.",
-        );
+        const fallbackProof =
+          embeddedProof && (embeddedProof.proofId === proofId || embeddedProof.id === proofId)
+            ? embeddedProof
+            : storedProof;
+        if (!fallbackProof) {
+          setPublicProof(undefined);
+          setBackendVerification(null);
+          setBackendVerificationError(error instanceof Error ? error.message : "Backend verification failed.");
+          return;
+        }
+
+        setPublicProof(fallbackProof);
+        return verifyProofBackend(fallbackProof)
+          .then(({ verification }) => {
+            setBackendVerification(verification);
+            setBackendVerificationError(isBackendAcceptedForLandlord(verification) ? null : verification.reason);
+          })
+          .catch((verifyError) => {
+            setBackendVerification(null);
+            setBackendVerificationError(backendVerificationErrorMessage(verifyError));
+          });
       })
       .finally(() => {
         setLoading(false);
       });
-  }, [proofId]);
+  }, [proofId, searchParams]);
 
   const proof = publicProof;
 
@@ -2765,6 +2794,7 @@ function PublicProofPage() {
               <ApplicationDetail label="Proof ID" value={proof.id} />
               <ApplicationDetail label="Tenant Wallet" value={proof.tenantWallet} />
               <ApplicationDetail label="Backend verification" value={<BackendVerificationBadge verification={backendVerification} unavailable={!backendVerification && !backendVerificationError} />} />
+              <ApplicationDetail label="Diagnostics" value={backendVerification?.diagnostics?.join(", ") ?? "Verification unavailable"} />
               <ApplicationDetail label="Execution mode" value={isSimulationOnlyProof(proof) ? <Badge tone="amber">Simulation only</Badge> : <Badge tone="green">Backend issued</Badge>} />
               <ApplicationDetail label="Signature" value={verification?.signatureValid ? "Verified" : "Verification unavailable"} />
               <ApplicationDetail label="Integrity" value={verification ? (verification.integrityValid ? "Valid" : "Tampered") : "Verification unavailable"} />

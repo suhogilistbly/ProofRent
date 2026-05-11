@@ -49,6 +49,7 @@ export type ProofIssueRequest = {
 export type ProofVerificationResult = {
   valid: boolean;
   reason: string;
+  diagnostics: string[];
   expired: boolean;
   signatureValid: boolean;
   integrityValid: boolean;

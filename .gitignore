@@ -20,6 +20,7 @@ logs/
 .vercel/
 tmp/
 temp/
+.proofrent-data/
 
 # Local environment and secrets
 .env
